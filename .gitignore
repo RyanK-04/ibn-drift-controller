@@ -1,0 +1,8 @@
+clab-*/
+*.log
+__pycache__/
+*.pyc
+.env
+*.qcow2
+*.vmdk
+*.tar
