@@ -1,0 +1,184 @@
+# Project   : An Autonomous Controller for Configuration, Audit and Remediation
+#             in Tier-1 Core Banking Infrastructure
+# File      : topologies/topology.yml
+
+name: banking-core-lab
+
+mgmt:
+  network: banking-mgmt
+  ipv4-subnet: 172.16.99.0/24
+
+topology:
+
+  nodes:
+
+    # CORE LAYER — Nokia SR Linux
+    # Role: High-speed backbone, OSPF routing, VRRP gateway redundancy
+
+    core-srl-1:
+      kind: srl
+      image: ghcr.io/nokia/srlinux:latest
+      mgmt-ipv4: 172.16.99.11
+      labels:
+        tier: core
+        vendor: nokia
+        role: core-switch
+        zabbix-monitor: "true"
+
+    core-srl-2:
+      kind: srl
+      image: ghcr.io/nokia/srlinux:latest
+      mgmt-ipv4: 172.16.99.12
+      labels:
+        tier: core
+        vendor: nokia
+        role: core-switch
+        zabbix-monitor: "true"
+
+    # DISTRIBUTION LAYER — Arista cEOS
+    # Role: Inter-VLAN routing, ACL enforcement, QoS marking, policy boundary
+
+    dist-ceos-1:
+      kind: ceos
+      image: local/ceos:4.36.1F
+      mgmt-ipv4: 172.16.99.21
+      env:
+        CEOS_INTF_MTU: "9214"
+        EOS_PLATFORM: ceoslab
+        SKIP_REBOOT_ON_CORE: "1"
+        INTF_REGEX: "eth[1-9]"
+      labels:
+        tier: distribution
+        vendor: arista
+        role: dist-switch
+        zabbix-monitor: "true"
+
+    dist-ceos-2:
+      kind: ceos
+      image: local/ceos:4.36.1F
+      mgmt-ipv4: 172.16.99.22
+      env:
+        CEOS_INTF_MTU: "9214"
+        EOS_PLATFORM: ceoslab
+        SKIP_REBOOT_ON_CORE: "1"
+        INTF_REGEX: "eth[1-9]"
+      labels:
+        tier: distribution
+        vendor: arista
+        role: dist-switch
+        zabbix-monitor: "true"
+
+    # ACCESS LAYER — Linux Containers (Dual-homed for redundancy)
+    # Role: End-device simulation — ATMs, Desktops, App Servers
+
+    access-atm-1:
+      kind: linux
+      image: alpine:latest
+      mgmt-ipv4: 172.16.99.31
+      labels:
+        tier: access
+        role: atm
+        vlan: "10"
+        zabbix-monitor: "true"
+
+    access-desktop-1:
+      kind: linux
+      image: alpine:latest
+      mgmt-ipv4: 172.16.99.32
+      labels:
+        tier: access
+        role: workstation
+        vlan: "20"
+        zabbix-monitor: "true"
+
+    access-appserver-1:
+      kind: linux
+      image: alpine:latest
+      mgmt-ipv4: 172.16.99.33
+      labels:
+        tier: access
+        role: app-server
+        vlan: "30"
+        zabbix-monitor: "true"
+
+    # MANAGEMENT PLANE
+    # Role: DHCP/HTTP ZTP Server + Zabbix + Python Controller
+
+    ztp-server:
+      kind: linux
+      image: ubuntu:24.04
+      mgmt-ipv4: 172.16.99.100
+      binds:
+        - ../scripts/ztp-server:/opt/ztp-server
+        - ../configs:/opt/configs
+      labels:
+        role: ztp-server
+        zabbix-monitor: "false"
+
+    zabbix-server:
+      kind: linux
+      image: ubuntu:22.04
+      mgmt-ipv4: 172.16.99.101
+      binds:
+        - ../scripts/zabbix:/opt/zabbix
+      labels:
+        role: zabbix-server
+        zabbix-monitor: "false"
+
+    controller:
+      kind: linux
+      image: python:3.11-slim
+      mgmt-ipv4: 172.16.99.102
+      binds:
+        - ../scripts/controller:/opt/controller
+        - ../configs:/opt/configs
+      labels:
+        role: python-controller
+        zabbix-monitor: "false"
+
+  links:
+
+    # CORE PEER LINK
+    - endpoints: ["core-srl-1:ethernet-1/1", "core-srl-2:ethernet-1/1"]
+
+    # CORE → DISTRIBUTION (Cross-connected)
+    - endpoints: ["core-srl-1:ethernet-1/2", "dist-ceos-1:eth1"]
+    - endpoints: ["core-srl-1:ethernet-1/3", "dist-ceos-2:eth1"]
+    - endpoints: ["core-srl-2:ethernet-1/2", "dist-ceos-1:eth2"]
+    - endpoints: ["core-srl-2:ethernet-1/3", "dist-ceos-2:eth2"]
+
+    # -------------------------------------------------------------------------
+    # DISTRIBUTION PEER LINK
+    # -------------------------------------------------------------------------
+    - endpoints: ["dist-ceos-1:eth3", "dist-ceos-2:eth3"]
+
+    # DISTRIBUTION → ACCESS (Dual-homed)
+    # Links from Distribution 1
+    - endpoints: ["dist-ceos-1:eth4", "access-atm-1:eth1"]
+    - endpoints: ["dist-ceos-1:eth5", "access-desktop-1:eth1"]
+    - endpoints: ["dist-ceos-1:eth6", "access-appserver-1:eth1"]
+    
+    # Links from Distribution 2
+    - endpoints: ["dist-ceos-2:eth4", "access-atm-1:eth2"]
+    - endpoints: ["dist-ceos-2:eth5", "access-desktop-1:eth2"]
+    - endpoints: ["dist-ceos-2:eth6", "access-appserver-1:eth2"]
+
+# =============================================================================
+# ADDRESSING PLAN REFERENCE
+# =============================================================================
+#
+#  Management Network : 172.16.99.0/24
+#
+#  NODE                IP              ROLE
+#  core-srl-1          172.16.99.11    Core switch (Nokia SR Linux)
+#  core-srl-2          172.16.99.12    Core switch (Nokia SR Linux)
+#  dist-ceos-1         172.16.99.21    Distribution switch (Arista cEOS)
+#  dist-ceos-2         172.16.99.22    Distribution switch (Arista cEOS)
+#  access-atm-1        172.16.99.31    ATM terminal       (VLAN 10)
+#  access-desktop-1    172.16.99.32    Staff workstation  (VLAN 20)
+#  access-appserver-1  172.16.99.33    Application server (VLAN 30)
+#  ztp-server          172.16.99.100   ZTP provisioning server (Ubuntu 24.04)
+#  zabbix-server       172.16.99.101   Zabbix monitoring server
+#  controller          172.16.99.102   Python autonomous controller
+#
+# =============================================================================
