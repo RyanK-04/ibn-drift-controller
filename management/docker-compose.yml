@@ -41,9 +41,9 @@ services:
     container_name: zabbix-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_DB: {db_name}
-      POSTGRES_USER: {user)}
-      POSTGRES_PASSWORD: {password}
+      POSTGRES_DB: zabbix
+      POSTGRES_USER: zabbix
+      POSTGRES_PASSWORD: zabbix_password
     volumes:
       - pgdata:/var/lib/postgresql/data
     networks:
@@ -56,9 +56,9 @@ services:
     restart: unless-stopped
     environment:
       - DB_SERVER_HOST=172.16.99.105
-      - POSTGRES_DB={db_name}
-      - POSTGRES_USER={user}
-      - POSTGRES_PASSWORD={password}
+      - POSTGRES_DB=zabbix
+      - POSTGRES_USER=zabbix
+      - POSTGRES_PASSWORD=zabbix_password
     ports:
       - "10051:10051"
     depends_on:
@@ -73,9 +73,9 @@ services:
     restart: unless-stopped
     environment:
       - DB_SERVER_HOST=172.16.99.105
-      - POSTGRES_DB={db_name}
-      - POSTGRES_USER={user}
-      - POSTGRES_PASSWORD={password}
+      - POSTGRES_DB=zabbix
+      - POSTGRES_USER=zabbix
+      - POSTGRES_PASSWORD=zabbix_password
       - ZBX_SERVER_HOST=172.16.99.106
     ports:
       - "8082:8080"
