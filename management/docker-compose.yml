@@ -1,7 +1,6 @@
-version: '3.8'
-
 networks:
   ibn_mgmt:
+    name: ibn_mgmt
     driver: bridge
     ipam:
       config:

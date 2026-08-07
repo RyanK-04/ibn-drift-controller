@@ -1,0 +1,6 @@
+{
+  "hostname": "client-atm",
+  "interface": "eth1",
+  "ip-address": "172.16.10.20/24",
+  "gateway": "172.16.10.1"
+}
