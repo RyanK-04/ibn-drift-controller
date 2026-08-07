@@ -1,0 +1,17 @@
+{
+  "hostname": "dist-srl-1",
+  "interfaces": [
+    {
+      "name": "e1-1",
+      "description": "Link to core-srl-1",
+      "admin-state": "enable",
+      "mtu": 9000
+    },
+    {
+      "name": "e1-2",
+      "description": "Link to core-srl-2",
+      "admin-state": "enable",
+      "mtu": 9000
+    }
+  ]
+}
