@@ -1,0 +1,27 @@
+{
+  "hostname": "core-srl-2",
+  "interfaces": [
+    { "name": "ethernet-1/1", "description": "Link to dist-srl-2", "admin-state": "enable", "mtu": 9000 },
+    { "name": "ethernet-1/2", "description": "Link to core-srl-1", "admin-state": "enable", "mtu": 9000 }
+  ],
+  "network-instances": [
+    {
+      "name": "default",
+      "type": "default",
+      "router-id": "192.168.100.2",
+      "protocols": {
+        "ospf": {
+          "admin-state": "enable",
+          "instance": [{ "name": "BANK-CORE-OSPF", "admin-state": "enable", "area": [{ "id": "0.0.0.0" }] }]
+        }
+      }
+    }
+  ],
+  "acl": {
+    "filter": [{
+      "name": "BANK-SECURITY-ACL",
+      "description": "Core security filter",
+      "entry": [{ "sequence-id": 10, "action": { "drop": {} }, "match": { "protocol": 23 } }]
+    }]
+  }
+}
