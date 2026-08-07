@@ -1,0 +1,6 @@
+{
+  "hostname": "server-app",
+  "interface": "eth1",
+  "ip-address": "172.16.20.10/24",
+  "gateway": "172.16.20.1"
+}
