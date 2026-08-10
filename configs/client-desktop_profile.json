@@ -1,6 +1,0 @@
-{
-  "hostname": "client-desktop",
-  "interface": "eth1",
-  "ip-address": "172.16.10.10/24",
-  "gateway": "172.16.10.1"
-}
