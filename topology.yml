@@ -1,9 +1,9 @@
+# /project/ibn-drift-controller/topology.yml
 name: enterprise-core-lab
 
 mgmt:
   network: ibn_mgmt
   ipv4-subnet: 172.16.99.0/24
-  ipv6-subnet: 2001:db8:99::/64
 
 topology:
   nodes:
