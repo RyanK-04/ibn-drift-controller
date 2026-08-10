@@ -1,0 +1,95 @@
+version: "3.8"
+
+networks:
+  ibn_mgmt:
+    external: true
+
+services:
+  # --- Zabbix Telemetry Stack ---
+  postgres-server:
+    image: postgres:15-alpine
+    container_name: zabbix-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: zabbix
+      POSTGRES_USER: ${ZABBIX_DB_USER}
+      POSTGRES_PASSWORD: ${ZABBIX_DB_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      ibn_mgmt:
+        ipv4_address: 172.16.99.105
+
+  zabbix-server:
+    image: zabbix/zabbix-server-pgsql:alpine-latest
+    container_name: zabbix-server
+    restart: unless-stopped
+    environment:
+      - DB_SERVER_HOST=172.16.99.105
+      - POSTGRES_DB=zabbix
+      - POSTGRES_USER=${ZABBIX_DB_USER}
+      - POSTGRES_PASSWORD=${ZABBIX_DB_PASSWORD}
+    ports:
+      - "10051:10051"
+    depends_on:
+      - postgres-server
+    networks:
+      ibn_mgmt:
+        ipv4_address: 172.16.99.106
+
+  zabbix-web:
+    image: zabbix/zabbix-web-nginx-pgsql:alpine-latest
+    container_name: zabbix-web
+    restart: unless-stopped
+    environment:
+      - DB_SERVER_HOST=172.16.99.105
+      - POSTGRES_DB=zabbix
+      - POSTGRES_USER=${ZABBIX_DB_USER}
+      - POSTGRES_PASSWORD=${ZABBIX_DB_PASSWORD}
+      - ZBX_SERVER_HOST=172.16.99.106
+    ports:
+      - "8082:8080"
+    depends_on:
+      - zabbix-server
+    networks:
+      ibn_mgmt:
+        ipv4_address: 172.16.99.107
+
+  # --- Autonomous Drift Controller ---
+  autonomous-controller:
+    image: python:3.11-alpine
+    container_name: autonomous-controller
+    restart: unless-stopped
+    working_dir: /opt/controller
+    volumes:
+      - ./:/opt/controller
+    networks:
+      ibn_mgmt:
+        ipv4_address: 172.16.99.102
+    depends_on:
+      - zabbix-server
+    command: >
+      sh -c "
+      apk add --no-cache getent &&
+      echo 'Verifying Zabbix server connectivity...' &&
+      while ! getent hosts 172.16.99.106; do sleep 2; done;
+      echo 'Zabbix is reachable. Starting controller environment...' &&
+      pip install --no-cache-dir pyyaml requests grpcio grpcio-tools &&
+      python3 controller/autonomous_engine.py
+      "
+
+  # --- Switch DHCP / ZTP Server ---
+  dhcp-ztp-server:
+    image: strm/dnsmasq
+    container_name: dhcp-ztp-server
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    volumes:
+      - ./dhcp:/etc/dnsmasq.d
+    networks:
+      ibn_mgmt:
+        ipv4_address: 172.16.99.100
+
+volumes:
+  pgdata:
