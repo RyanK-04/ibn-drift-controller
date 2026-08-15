@@ -1,39 +1,29 @@
-# /project/ibn-drift-controller/topology.yml
 name: enterprise-core-lab
-
 mgmt:
   network: ibn_mgmt
   ipv4-subnet: 172.16.99.0/24
-
 topology:
   nodes:
-    # --- Core Layer ---
     core-srl-1:
       kind: nokia_srlinux
       image: ghcr.io/nokia/srlinux:latest
       type: ixr-d2l
       mgmt-ipv4: 172.16.99.2
-
     core-srl-2:
       kind: nokia_srlinux
       image: ghcr.io/nokia/srlinux:latest
       type: ixr-d2l
       mgmt-ipv4: 172.16.99.3
-
-    # --- Distribution Layer ---
     dist-srl-1:
       kind: nokia_srlinux
       image: ghcr.io/nokia/srlinux:latest
       type: ixr-d2l
       mgmt-ipv4: 172.16.99.4
-
     dist-srl-2:
       kind: nokia_srlinux
       image: ghcr.io/nokia/srlinux:latest
       type: ixr-d2l
       mgmt-ipv4: 172.16.99.5
-
-    # --- Access Layer Clients (Lightweight Alpine) ---
     transaction-terminal:
       kind: linux
       image: alpine:latest
@@ -43,7 +33,6 @@ topology:
       exec:
         - apk add --no-cache yq iproute2
         - sh -c 'ip addr add $(yq eval ".transaction-terminal.ip" /tmp/init.yml) dev eth1; ip route add default via $(yq eval ".transaction-terminal.gw" /tmp/init.yml)'
-
     desktop-workstation:
       kind: linux
       image: alpine:latest
@@ -53,7 +42,6 @@ topology:
       exec:
         - apk add --no-cache yq iproute2
         - sh -c 'ip addr add $(yq eval ".desktop-workstation.ip" /tmp/init.yml) dev eth1; ip route add default via $(yq eval ".desktop-workstation.gw" /tmp/init.yml)'
-
     application-server:
       kind: linux
       image: alpine:latest
@@ -63,21 +51,13 @@ topology:
       exec:
         - apk add --no-cache yq iproute2
         - sh -c 'ip addr add $(yq eval ".application-server.ip" /tmp/init.yml) dev eth1; ip route add default via $(yq eval ".application-server.gw" /tmp/init.yml)'
-
   links:
-    # Core Peer Link
     - endpoints: ["core-srl-1:e1-1", "core-srl-2:e1-1"]
-    
-    # Core to Distribution Links (Redundant Mesh)
     - endpoints: ["core-srl-1:e1-2", "dist-srl-1:e1-1"]
     - endpoints: ["core-srl-1:e1-3", "dist-srl-2:e1-1"]
     - endpoints: ["core-srl-2:e1-2", "dist-srl-1:e1-2"]
     - endpoints: ["core-srl-2:e1-3", "dist-srl-2:e1-2"]
-
-    # Distribution Peer Link
     - endpoints: ["dist-srl-1:e1-3", "dist-srl-2:e1-3"]
-
-    # Access Layer to Distribution Links
     - endpoints: ["transaction-terminal:eth1", "dist-srl-1:e1-4"]
     - endpoints: ["desktop-workstation:eth1", "dist-srl-1:e1-5"]
     - endpoints: ["application-server:eth1", "dist-srl-2:e1-4"]
