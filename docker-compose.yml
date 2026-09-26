@@ -1,11 +1,8 @@
 version: "3.8"
-
 networks:
   ibn_mgmt:
     external: true
-
 services:
-  # --- Zabbix Telemetry Stack ---
   postgres-server:
     image: postgres:15-alpine
     container_name: zabbix-postgres
@@ -19,7 +16,6 @@ services:
     networks:
       ibn_mgmt:
         ipv4_address: 172.16.99.105
-
   zabbix-server:
     image: zabbix/zabbix-server-pgsql:alpine-latest
     container_name: zabbix-server
@@ -36,7 +32,6 @@ services:
     networks:
       ibn_mgmt:
         ipv4_address: 172.16.99.106
-
   zabbix-web:
     image: zabbix/zabbix-web-nginx-pgsql:alpine-latest
     container_name: zabbix-web
@@ -54,13 +49,21 @@ services:
     networks:
       ibn_mgmt:
         ipv4_address: 172.16.99.107
-
-  # --- Autonomous Drift Controller ---
   autonomous-controller:
     image: python:3.11-alpine
     container_name: autonomous-controller
     restart: unless-stopped
     working_dir: /opt/controller
+    environment:
+      - SRL_USERNAME=${SRL_USERNAME}
+      - SRL_PASSWORD=${SRL_PASSWORD}
+      - ALPINE_USERNAME=${ALPINE_USERNAME}
+      - ALPINE_PASSWORD=${ALPINE_PASSWORD}
+      - INTENT_FILE=/opt/controller/controller/intent.yml
+      - DAY0_INVENTORY_FILE=/opt/controller/provisioning/day0_inventory.yml
+      - LINUX_INIT_FILE=/opt/controller/provisioning/client-static-init.yml
+      - TEMPLATES_DIR=/opt/controller/provisioning
+      - MAX_REMEDIATION_ATTEMPTS=3
     volumes:
       - ./:/opt/controller
     networks:
@@ -70,26 +73,12 @@ services:
       - zabbix-server
     command: >
       sh -c "
-      apk add --no-cache getent &&
+      apk add --no-cache gcc musl-dev libffi-dev bind-tools iputils &&
       echo 'Verifying Zabbix server connectivity...' &&
-      while ! getent hosts 172.16.99.106; do sleep 2; done;
+      while ! host 172.16.99.106; do sleep 2; done;
       echo 'Zabbix is reachable. Starting controller environment...' &&
-      pip install --no-cache-dir pyyaml requests grpcio grpcio-tools &&
+      pip install --no-cache-dir pyyaml requests pygnmi netmiko grpcio grpcio-tools jinja2 &&
       python3 controller/autonomous_engine.py
       "
-
-  # --- Switch DHCP / ZTP Server ---
-  dhcp-ztp-server:
-    image: strm/dnsmasq
-    container_name: dhcp-ztp-server
-    restart: unless-stopped
-    cap_add:
-      - NET_ADMIN
-    volumes:
-      - ./dhcp:/etc/dnsmasq.d
-    networks:
-      ibn_mgmt:
-        ipv4_address: 172.16.99.100
-
 volumes:
   pgdata:

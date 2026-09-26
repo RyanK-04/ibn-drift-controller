@@ -1,0 +1,93 @@
+enter candidate
+
+# ============================================================
+# System Naming
+# ============================================================
+
+set / system name host-name {{ hostname }}
+
+# ============================================================
+# Management and APIs
+# ============================================================
+
+# gNMI / gRPC
+set / system grpc-server mgmt admin-state enable
+set / system grpc-server mgmt network-instance mgmt
+set / system grpc-server mgmt port 57400
+set / system grpc-server mgmt services [ gnmi ]
+
+# JSON-RPC
+set / system json-rpc-server admin-state enable
+set / system json-rpc-server network-instance mgmt http admin-state enable
+set / system json-rpc-server network-instance mgmt http use-authentication true
+set / system json-rpc-server network-instance mgmt http port 80
+
+# ============================================================
+# Routed Interfaces
+# ============================================================
+
+{% for iface, ip in interfaces.items() %}
+
+set / interface {{ iface }} admin-state enable
+set / interface {{ iface }} subinterface 0 admin-state enable
+set / interface {{ iface }} subinterface 0 ipv4 admin-state enable
+set / interface {{ iface }} subinterface 0 ipv4 address {{ ip }}
+
+{% endfor %}
+
+# ============================================================
+# Per-Host VLAN Sub-interfaces (Distribution Downlinks)
+# ============================================================
+
+{% for vlan in vlan_interfaces %}
+
+# VLAN {{ vlan.vlan_id }} - {{ vlan.description }}
+set / interface {{ vlan.port }} admin-state enable
+set / interface {{ vlan.port }} vlan-tagging true
+
+set / interface {{ vlan.port }} subinterface {{ vlan.subinterface_index }} admin-state enable
+set / interface {{ vlan.port }} subinterface {{ vlan.subinterface_index }} type routed
+
+set / interface {{ vlan.port }} subinterface {{ vlan.subinterface_index }} vlan encap single-tagged vlan-id {{ vlan.vlan_id }}
+
+set / interface {{ vlan.port }} subinterface {{ vlan.subinterface_index }} ipv4 admin-state enable
+set / interface {{ vlan.port }} subinterface {{ vlan.subinterface_index }} ipv4 address {{ vlan.gateway_ip }}
+
+{% endfor %}
+
+# ============================================================
+# Default Network Instance
+# ============================================================
+
+set / network-instance default type default
+
+{% for iface in interfaces.keys() %}
+set / network-instance default interface {{ iface }}.0
+{% endfor %}
+
+{% for vlan in vlan_interfaces %}
+set / network-instance default interface {{ vlan.port }}.{{ vlan.subinterface_index }}
+{% endfor %}
+
+# ============================================================
+# OSPFv2
+# ============================================================
+
+set / network-instance default protocols ospf instance default admin-state enable
+set / network-instance default protocols ospf instance default version ospf-v2
+set / network-instance default protocols ospf instance default router-id {{ router_id }}
+
+{% for iface in interfaces.keys() %}
+set / network-instance default protocols ospf instance default area 0.0.0.0 interface {{ iface }}.0 interface-type point-to-point
+{% endfor %}
+
+{% for vlan in vlan_interfaces %}
+set / network-instance default protocols ospf instance default area 0.0.0.0 interface {{ vlan.port }}.{{ vlan.subinterface_index }} passive true
+{% endfor %}
+
+# ============================================================
+# Commit and save
+# ============================================================
+
+commit save
+

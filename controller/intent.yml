@@ -1,63 +1,51 @@
 network_domain: "enterprise-core"
+
 global_settings:
+
   routing:
     protocol: "ospfv2"
     area: "0.0.0.0"
+
   telemetry:
     grpc_target: "172.16.99.106"
     port: 10051
+
   security:
     acl_name: "ENTERPRISE-SECURITY-ACL"
+
     drop_tcp_ports:
       - 23
+
+    authorized_users:
+      - admin
+
+  system_banner: "AUTHORIZED ENTERPRISE ACCESS ONLY"
+
+  linux_services:
+    expected_dns: "8.8.8.8"
+
+
 devices:
+
   - name: "core-srl-1"
     management_ip: "172.16.99.2"
-    router_id: "192.168.100.1"
-    interfaces:
-      - name: "ethernet-1/1"
-        admin-state: "enable"
-      - name: "ethernet-1/2"
-        admin-state: "enable"
+
   - name: "core-srl-2"
     management_ip: "172.16.99.3"
-    router_id: "192.168.100.2"
-    interfaces:
-      - name: "ethernet-1/1"
-        admin-state: "enable"
-      - name: "ethernet-1/2"
-        admin-state: "enable"
+
   - name: "dist-srl-1"
     management_ip: "172.16.99.4"
-    router_id: "192.168.100.3"
-    interfaces:
-      - name: "ethernet-1/1"
-        admin-state: "enable"
-      - name: "ethernet-1/2"
-        admin-state: "enable"
-      - name: "ethernet-1/3"
-        admin-state: "enable"
-      - name: "ethernet-1/4"
-        admin-state: "enable"
-        subinterfaces:
-          - index: 10
-            ipv4: "172.16.10.2/24"
-            vrrp_ip: "172.16.10.1"
-            vrrp_priority: 150
+    vrrp_priority: 150
+
   - name: "dist-srl-2"
     management_ip: "172.16.99.5"
-    router_id: "192.168.100.4"
-    interfaces:
-      - name: "ethernet-1/1"
-        admin-state: "enable"
-      - name: "ethernet-1/2"
-        admin-state: "enable"
-      - name: "ethernet-1/3"
-        admin-state: "enable"
-      - name: "ethernet-1/4"
-        admin-state: "enable"
-        subinterfaces:
-          - index: 10
-            ipv4: "172.16.10.3/24"
-            vrrp_ip: "172.16.10.1"
-            vrrp_priority: 100
+    vrrp_priority: 100
+
+  - name: "transaction-terminal"
+    management_ip: "172.16.99.6"
+
+  - name: "desktop-workstation"
+    management_ip: "172.16.99.7"
+
+  - name: "application-server"
+    management_ip: "172.16.99.8"

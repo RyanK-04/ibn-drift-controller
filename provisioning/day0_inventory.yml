@@ -1,0 +1,64 @@
+switches:
+
+  core-srl-1:
+    mgmt_ip: 172.16.99.2
+    router_id: 10.255.0.1
+
+    interfaces:
+      ethernet-1/1: 10.0.0.0/31
+      ethernet-1/2: 10.0.0.2/31
+      ethernet-1/3: 10.0.0.4/31
+
+  core-srl-2:
+    mgmt_ip: 172.16.99.3
+    router_id: 10.255.0.2
+
+    interfaces:
+      ethernet-1/1: 10.0.0.1/31
+      ethernet-1/2: 10.0.0.6/31
+      ethernet-1/3: 10.0.0.8/31
+
+  dist-srl-1:
+    mgmt_ip: 172.16.99.4
+    router_id: 10.255.0.3
+
+    interfaces:
+      ethernet-1/1: 10.0.0.3/31
+      ethernet-1/2: 10.0.0.7/31
+      ethernet-1/3: 10.0.0.10/31
+
+    # Each Linux endpoint gets its own dedicated VLAN, single-homed to whichever
+    # distribution switch it is physically wired to in topology.yml. There is no
+    # VRRP here: a per-host VLAN only exists behind one switch, so there is
+    # nothing to fail over between - unlike the old single shared vlan_interface.
+    vlan_interfaces:
+      - name: atm
+        description: "ATM (transaction-terminal)"
+        vlan_id: 10
+        port: ethernet-1/4
+        subinterface_index: 10
+        gateway_ip: 10.10.10.1/24
+
+      - name: client
+        description: "Client workstation (desktop-workstation)"
+        vlan_id: 30
+        port: ethernet-1/5
+        subinterface_index: 30
+        gateway_ip: 10.10.30.1/24
+
+  dist-srl-2:
+    mgmt_ip: 172.16.99.5
+    router_id: 10.255.0.4
+
+    interfaces:
+      ethernet-1/1: 10.0.0.5/31
+      ethernet-1/2: 10.0.0.9/31
+      ethernet-1/3: 10.0.0.11/31
+
+    vlan_interfaces:
+      - name: mobile-banking
+        description: "Mobile banking server (application-server)"
+        vlan_id: 20
+        port: ethernet-1/4
+        subinterface_index: 20
+        gateway_ip: 10.10.20.1/24
