@@ -1,4 +1,2 @@
-.env
-logs/
-__pycache__/
-*.pyc
+clab-enterprise-core-lab/
+configs/
