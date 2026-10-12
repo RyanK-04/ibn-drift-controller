@@ -1,7 +1,9 @@
 version: "3.8"
+
 networks:
   ibn_mgmt:
     external: true
+
 services:
   postgres-server:
     image: postgres:15-alpine
@@ -16,6 +18,7 @@ services:
     networks:
       ibn_mgmt:
         ipv4_address: 172.16.99.105
+
   zabbix-server:
     image: zabbix/zabbix-server-pgsql:alpine-latest
     container_name: zabbix-server
@@ -25,13 +28,17 @@ services:
       - POSTGRES_DB=zabbix
       - POSTGRES_USER=${ZABBIX_DB_USER}
       - POSTGRES_PASSWORD=${ZABBIX_DB_PASSWORD}
+      - ZBX_STARTREPORTWRITERS=2
+      - ZBX_WEBSERVICEURL=http://zabbix-web-service:10053/report
     ports:
       - "10051:10051"
     depends_on:
       - postgres-server
+      - zabbix-web-service
     networks:
       ibn_mgmt:
         ipv4_address: 172.16.99.106
+
   zabbix-web:
     image: zabbix/zabbix-web-nginx-pgsql:alpine-latest
     container_name: zabbix-web
@@ -49,6 +56,17 @@ services:
     networks:
       ibn_mgmt:
         ipv4_address: 172.16.99.107
+
+  zabbix-web-service:
+    image: zabbix/zabbix-web-service:alpine-7.4-latest
+    container_name: zabbix-web-service
+    restart: unless-stopped
+    environment:
+      - ZBX_ALLOWEDIP=172.16.99.106
+    networks:
+      ibn_mgmt:
+        ipv4_address: 172.16.99.108
+
   autonomous-controller:
     image: python:3.11-alpine
     container_name: autonomous-controller
@@ -80,5 +98,6 @@ services:
       pip install --no-cache-dir pyyaml requests pygnmi netmiko grpcio grpcio-tools jinja2 &&
       python3 controller/autonomous_engine.py
       "
+
 volumes:
   pgdata:

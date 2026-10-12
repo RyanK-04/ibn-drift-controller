@@ -1,3 +1,4 @@
+import html
 import json
 import logging
 import os
@@ -49,6 +50,7 @@ SRL_CONTROL_SLOT = os.environ.get("SRL_CONTROL_SLOT", "A")
 PING_TIMEOUT_SECONDS = int(os.environ.get("PING_TIMEOUT_SECONDS", "1"))
 MAX_REMEDIATION_ATTEMPTS = int(os.environ.get("MAX_REMEDIATION_ATTEMPTS", "3"))
 REMEDIATION_VERIFY_DELAY = float(os.environ.get("REMEDIATION_VERIFY_DELAY", "2"))
+TCP_CONNECT_TIMEOUT = float(os.environ.get("TCP_CONNECT_TIMEOUT", "2"))
 
 TEMPLATES_DIR = os.environ.get("TEMPLATES_DIR", "/opt/controller/provisioning")
 REMEDIATION_TEMPLATE = "srl_remediation.j2"
@@ -83,7 +85,10 @@ def load_linux_init() -> Dict[str, Any]:
     return load_yaml(LINUX_INIT_FILE)
 
 
-def build_alpine_node_config(device: Dict[str, Any], linux_init_data: Dict[str, Any]) -> Dict[str, Any]:
+def build_alpine_node_config(
+    device: Dict[str, Any],
+    linux_init_data: Dict[str, Any],
+) -> Dict[str, Any]:
     name = device["name"]
     facts = linux_init_data.get(name, {})
     return {
@@ -96,7 +101,10 @@ def build_alpine_node_config(device: Dict[str, Any], linux_init_data: Dict[str, 
     }
 
 
-def build_node_config(device: Dict[str, Any], day0_data: Dict[str, Any]) -> Dict[str, Any]:
+def build_node_config(
+    device: Dict[str, Any],
+    day0_data: Dict[str, Any],
+) -> Dict[str, Any]:
     name = device["name"]
     facts = day0_data.get("switches", {}).get(name, {})
     return {
@@ -109,7 +117,7 @@ def build_node_config(device: Dict[str, Any], day0_data: Dict[str, Any]) -> Dict
 
 
 # ============================================================
-# Device state
+# Device state and incident deduplication
 # ============================================================
 
 DEVICE_STATE_COMPLIANT = "COMPLIANT"
@@ -119,18 +127,23 @@ DEVICE_STATE_MANUAL = "MANUAL_REVIEW"
 DEVICE_STATE_UNREACHABLE = "UNREACHABLE"
 DEVICE_STATE_TELEMETRY_ERROR = "TELEMETRY_ERROR"
 
-# Zabbix remediation status values
 REMEDIATION_STATUS_NONE = 0
 REMEDIATION_STATUS_IN_PROGRESS = 1
 REMEDIATION_STATUS_RECOVERED = 2
 REMEDIATION_STATUS_FAILED = 3
 REMEDIATION_STATUS_MANUAL_REVIEW = 4
 
-# Zabbix reachability / telemetry values
 DEVICE_REACHABLE = 1
 DEVICE_UNREACHABLE = 0
 TELEMETRY_OK = 1
 TELEMETRY_FAILED = 0
+
+# These keys track currently active incidents separately. An incident is
+# re-notified only after it has cleared and later recurs.
+INCIDENT_DRIFT = "CONFIGURATION_DRIFT"
+INCIDENT_UNREACHABLE = "DEVICE_UNREACHABLE"
+INCIDENT_TELEMETRY = "TELEMETRY_ERROR"
+INCIDENT_SECURITY_REVIEW = "SECURITY_MANUAL_REVIEW"
 
 _device_states: Dict[str, Dict[str, Any]] = {}
 
@@ -142,13 +155,39 @@ def get_device_state(name: str) -> Dict[str, Any]:
             "state": DEVICE_STATE_COMPLIANT,
             "remediation_attempts": 0,
             "finding_signature": None,
-            "last_incident_signature": None,
+            "last_incident_signature": None,  # kept for compatibility
+            "active_incidents": set(),
         },
     )
 
 
 def finding_signature(reasons: List[str]) -> str:
     return " | ".join(sorted(reasons))
+
+
+def mask_ip_address(ip: str) -> str:
+    """Mask the final IPv4 octet for email/reporting."""
+    try:
+        parts = ip.split(".")
+        if len(parts) == 4:
+            return ".".join(parts[:3] + ["xxx"])
+    except Exception:
+        pass
+    return "masked"
+
+
+def build_drift_details(reasons: List[str]) -> str:
+    if not reasons:
+        return "No active configuration drift."
+    return "<br>".join(f"• {html.escape(str(reason))}" for reason in reasons)
+
+
+def clear_incident(state: Dict[str, Any], incident_key: str) -> None:
+    state.setdefault("active_incidents", set()).discard(incident_key)
+
+
+def is_incident_active(state: Dict[str, Any], incident_key: str) -> bool:
+    return incident_key in state.setdefault("active_incidents", set())
 
 
 # ============================================================
@@ -163,7 +202,9 @@ _jinja_env = Environment(
 
 
 def render_remediation_commands(
-    node_config: Dict[str, Any], intent_data: Dict[str, Any], drift_reasons: List[str]
+    node_config: Dict[str, Any],
+    intent_data: Dict[str, Any],
+    drift_reasons: List[str],
 ) -> List[Dict[str, Any]]:
     security = intent_data["global_settings"]["security"]
     template = _jinja_env.get_template(REMEDIATION_TEMPLATE)
@@ -177,13 +218,17 @@ def render_remediation_commands(
         router_id=node_config["router_id"],
         area_id=intent_data["global_settings"]["routing"].get("area", OSPF_AREA_ID),
         vlan_interfaces=node_config["vlan_interfaces"],
-        purge_backdoor=any("backdoor account" in reason.lower() for reason in drift_reasons),
+        purge_backdoor=any(
+            "backdoor account" in reason.lower() for reason in drift_reasons
+        ),
     )
 
     try:
         commands = json.loads(rendered)
     except json.JSONDecodeError as exc:
-        raise RuntimeError(f"Rendered remediation template is not valid JSON: {exc}\n---\n{rendered}")
+        raise RuntimeError(
+            f"Rendered remediation template is not valid JSON: {exc}\n---\n{rendered}"
+        ) from exc
 
     if not isinstance(commands, list):
         raise RuntimeError("Remediation template must render a JSON list")
@@ -218,32 +263,92 @@ def send_zabbix_metrics(host: str, key_value_pairs: Dict[str, Any]) -> bool:
             sock.settimeout(5)
             sock.connect((ZABBIX_SERVER, ZABBIX_PORT))
             sock.sendall(header + payload)
-            response = sock.recv(4096)
 
-        if not response.startswith(b"ZBXD\x01"):
-            raise RuntimeError("Zabbix returned an invalid sender response")
+            # Read the complete Zabbix protocol header (5-byte magic + 8-byte
+            # little-endian payload length), then read the entire response.
+            response_header = bytearray()
+            while len(response_header) < 13:
+                chunk = sock.recv(13 - len(response_header))
+                if not chunk:
+                    raise RuntimeError("Zabbix closed the connection before sending its header")
+                response_header.extend(chunk)
 
-        response_payload = response[13:].decode("utf-8", errors="replace")
-        response_data = json.loads(response_payload)
-        failed = int(response_data.get("failed", 0))
-        processed = int(response_data.get("processed", 0))
+            if response_header[:5] != b"ZBXD\x01":
+                raise RuntimeError("Zabbix returned an invalid sender response")
 
-        if failed:
+            response_length = int.from_bytes(response_header[5:13], byteorder="little")
+            response_bytes = bytearray()
+            while len(response_bytes) < response_length:
+                chunk = sock.recv(min(4096, response_length - len(response_bytes)))
+                if not chunk:
+                    raise RuntimeError("Zabbix closed the connection before sending its full response")
+                response_bytes.extend(chunk)
+
+        response_data = json.loads(response_bytes.decode("utf-8", errors="replace"))
+        info = str(response_data.get("info", ""))
+        # Zabbix sender commonly reports counts in its info string.
+        counts = {
+            key: int(value)
+            for key, value in re.findall(r"\b(processed|failed|total):\s*(\d+)", info)
+        }
+        processed = int(response_data.get("processed", counts.get("processed", 0)) or 0)
+        failed = int(response_data.get("failed", counts.get("failed", 0)) or 0)
+        total = int(counts.get("total", len(key_value_pairs)))
+
+        if response_data.get("response", "success") != "success" or failed > 0 or processed != total:
             logger.error(
-                "[ZABBIX] Server rejected %d/%d item(s) for %s: %s",
-                failed,
-                len(key_value_pairs),
-                host,
-                response_data,
+                "[ZABBIX] Server accepted %d/%d item(s) for %s; failed=%d; response=%s",
+                processed, total, host, failed, response_data,
             )
             return False
 
         logger.info("[ZABBIX] Accepted %d item(s) for %s", processed, host)
         return True
-
     except Exception as exc:
         logger.error("[ZABBIX] Failed to send trap(s) for %s: %s", host, exc)
         return False
+
+
+# ============================================================
+# Reachability helpers
+# ============================================================
+
+def tcp_port_open(ip: str, port: int, timeout: float = TCP_CONNECT_TIMEOUT) -> bool:
+    try:
+        with socket.create_connection((ip, port), timeout=timeout):
+            return True
+    except (OSError, TimeoutError):
+        return False
+
+
+def ping_host(ip: str) -> bool:
+    try:
+        result = subprocess.run(
+            ["ping", "-c", "1", "-W", str(PING_TIMEOUT_SECONDS), ip],
+            capture_output=True,
+            text=True,
+            timeout=PING_TIMEOUT_SECONDS + 2,
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def classify_management_failure(ip: str, service_port: int, secondary_port: Optional[int] = None) -> str:
+    """
+    Return 'TELEMETRY_ERROR' if the host appears reachable but its monitoring
+    service failed; otherwise return 'UNREACHABLE'.
+
+    ICMP can be blocked in some environments, so an open secondary management
+    port also counts as evidence that the host is reachable.
+    """
+    if tcp_port_open(ip, service_port):
+        return DEVICE_STATE_TELEMETRY_ERROR
+    if secondary_port and tcp_port_open(ip, secondary_port):
+        return DEVICE_STATE_TELEMETRY_ERROR
+    if ping_host(ip):
+        return DEVICE_STATE_TELEMETRY_ERROR
+    return DEVICE_STATE_UNREACHABLE
 
 
 # ============================================================
@@ -292,50 +397,39 @@ def collect_switch_metrics(gc: gNMIclient, node_ip: str) -> Dict[str, Any]:
     latency = measure_latency_ms(node_ip)
     if latency is not None:
         metrics["ibn.metrics.latency_ms"] = latency
-
     return metrics
 
 
 def collect_alpine_metrics(ssh: ConnectHandler, node_ip: str) -> Dict[str, Any]:
     metrics: Dict[str, Any] = {}
 
-    # CPU utilization
     try:
         cpu_command = (
             "awk '/^cpu / {total=$2+$3+$4+$5+$6+$7+$8; idle=$5; "
             "printf \"%.2f %.2f\\n\", total, idle}' /proc/stat"
         )
-
         first = ssh.send_command(cpu_command).strip().split()
         if len(first) == 2:
-            total_1 = float(first[0])
-            idle_1 = float(first[1])
-
+            total_1, idle_1 = float(first[0]), float(first[1])
             time.sleep(0.2)
-
             second = ssh.send_command(cpu_command).strip().split()
             if len(second) == 2:
-                total_2 = float(second[0])
-                idle_2 = float(second[1])
-                total_delta = total_2 - total_1
-                idle_delta = idle_2 - idle_1
-
+                total_2, idle_2 = float(second[0]), float(second[1])
+                total_delta, idle_delta = total_2 - total_1, idle_2 - idle_1
                 if total_delta > 0:
-                    cpu_utilization = 100.0 * (1.0 - idle_delta / total_delta)
+                    cpu = 100.0 * (1.0 - idle_delta / total_delta)
                     metrics["ibn.metrics.cpu_utilization_percent"] = round(
-                        max(0.0, min(100.0, cpu_utilization)), 2
+                        max(0.0, min(100.0, cpu)), 2
                     )
     except Exception as exc:
         logger.error("[METRICS] Failed to read CPU on %s: %s", node_ip, exc)
 
-    # Memory utilization
     try:
         meminfo = ssh.send_command("cat /proc/meminfo")
         total_match = re.search(r"MemTotal:\s+(\d+)", meminfo)
         available_match = re.search(r"MemAvailable:\s+(\d+)", meminfo)
         if total_match and available_match:
-            total_kb = int(total_match.group(1))
-            available_kb = int(available_match.group(1))
+            total_kb, available_kb = int(total_match.group(1)), int(available_match.group(1))
             if total_kb > 0:
                 metrics["ibn.metrics.memory_utilization_percent"] = round(
                     100.0 * (total_kb - available_kb) / total_kb, 2
@@ -343,30 +437,24 @@ def collect_alpine_metrics(ssh: ConnectHandler, node_ip: str) -> Dict[str, Any]:
     except Exception as exc:
         logger.error("[METRICS] Failed to read memory on %s: %s", node_ip, exc)
 
-    # Root filesystem utilization
     try:
         disk_output = ssh.send_command(
             "df -P / | awk 'NR==2 {gsub(/%/,\"\",$5); print $5}'"
         ).strip()
         if disk_output:
-            metrics["ibn.metrics.disk_utilization_percent"] = round(
-                float(disk_output), 2
-            )
+            metrics["ibn.metrics.disk_utilization_percent"] = round(float(disk_output), 2)
     except Exception as exc:
         logger.error("[METRICS] Failed to read disk utilization on %s: %s", node_ip, exc)
 
-    # Uptime
     try:
         proc_uptime = ssh.send_command("cat /proc/uptime")
         metrics["ibn.metrics.uptime_seconds"] = float(proc_uptime.split()[0])
     except Exception as exc:
         logger.error("[METRICS] Failed to read uptime on %s: %s", node_ip, exc)
 
-    # Latency from the autonomous controller to the endpoint
     latency = measure_latency_ms(node_ip)
     if latency is not None:
         metrics["ibn.metrics.latency_ms"] = latency
-
     return metrics
 
 
@@ -378,13 +466,9 @@ def json_rpc_set(node_ip: str, commands: List[Dict[str, Any]]) -> Dict[str, Any]
         "method": "set",
         "params": {"commands": commands},
     }
-
     response = requests.post(
-        url,
-        json=payload,
-        auth=(SRL_USERNAME, SRL_PASSWORD),
-        verify=False,
-        timeout=10,
+        url, json=payload, auth=(SRL_USERNAME, SRL_PASSWORD),
+        verify=False, timeout=10,
     )
     response.raise_for_status()
     data = response.json()
@@ -399,19 +483,14 @@ def json_rpc_set(node_ip: str, commands: List[Dict[str, Any]]) -> Dict[str, Any]
 
 def gnmi_get_value(gc: gNMIclient, path: str) -> Any:
     """
-    Return the first structured value for a path.
-
-    Exceptions are deliberately raised to the caller. "Path absent" and
-    "telemetry failed" are different conditions and must not be treated as
-    the same thing by the reconciliation engine.
+    Return the first structured value for a path. Exceptions are allowed to
+    propagate so missing data is not confused with telemetry failure.
     """
     response = gc.get(path=[path], datatype="all")
-
     for notification in response.get("notification", []):
         updates = notification.get("update", [])
         if updates:
             return updates[0].get("val")
-
     return None
 
 
@@ -419,37 +498,50 @@ def gnmi_get_value(gc: gNMIclient, path: str) -> Any:
 # SR Linux drift detection
 # ============================================================
 
-def detect_switch_drift(gc: gNMIclient, node_config: Dict[str, Any], intent_data: Dict[str, Any]) -> List[str]:
+def detect_switch_drift(
+    gc: gNMIclient,
+    node_config: Dict[str, Any],
+    intent_data: Dict[str, Any],
+) -> List[str]:
     drift_reasons: List[str] = []
-
     security = intent_data["global_settings"]["security"]
     acl_name = security["acl_name"]
     drop_port = int(security["drop_tcp_ports"][0])
     expected_banner = intent_data["global_settings"]["system_banner"]
     routing_protocol = intent_data["global_settings"]["routing"]["protocol"].lower()
     area_id = intent_data["global_settings"]["routing"].get("area", OSPF_AREA_ID)
-
     router_id = node_config["router_id"]
     interfaces = node_config["interfaces"]
     vlan_interfaces = node_config["vlan_interfaces"]
 
     acl_val = gnmi_get_value(gc, f"/acl/acl-filter[name={acl_name}][type=ipv4]")
     if acl_val is None:
-        drift_reasons.append("Security ACL missing")
+        drift_reasons.append(
+            f"Security ACL missing | Current: absent | Expected: ACL {acl_name} "
+            f"with drop destination port {drop_port}"
+        )
     else:
         entries = acl_val.get("entry", []) if isinstance(acl_val, dict) else []
         has_matching_drop = any(
             "drop" in entry.get("action", {})
-            and str(entry.get("match", {}).get("transport", {}).get("destination-port", {}).get("value"))
-            == str(drop_port)
+            and str(
+                entry.get("match", {}).get("transport", {})
+                .get("destination-port", {}).get("value")
+            ) == str(drop_port)
             for entry in entries
         )
         if not has_matching_drop:
-            drift_reasons.append("Security ACL present but drop-port rule missing/incorrect")
+            drift_reasons.append(
+                f"Security ACL present but drop-port rule missing/incorrect | "
+                f"Current: required drop rule for destination port {drop_port} not present | "
+                f"Expected: drop destination port {drop_port}"
+            )
 
     banner_val = gnmi_get_value(gc, "/system/banner/login-banner")
     if banner_val != expected_banner:
-        drift_reasons.append("Login-banner mismatch")
+        drift_reasons.append(
+            f"Login-banner mismatch | Current: {banner_val!r} | Expected: {expected_banner!r}"
+        )
 
     for iface in interfaces.keys():
         mtu_val = gnmi_get_value(gc, f"/interface[name={iface}]/mtu")
@@ -458,18 +550,21 @@ def detect_switch_drift(gc: gNMIclient, node_config: Dict[str, Any], intent_data
         except (TypeError, ValueError):
             mtu_ok = False
         if not mtu_ok:
-            drift_reasons.append(f"MTU degraded on {iface}")
+            drift_reasons.append(
+                f"MTU degraded on {iface} | Current: {mtu_val} | Expected: 9000"
+            )
 
     if routing_protocol == "ospfv2":
         ospf_val = gnmi_get_value(
             gc, "/network-instance[name=default]/protocols/ospf/instance[name=default]"
         )
         if ospf_val is None:
-            drift_reasons.append("OSPFv2 instance deleted")
+            drift_reasons.append(
+                "OSPFv2 instance deleted | Current: absent | Expected: configured OSPFv2 instance"
+            )
         else:
             admin_state_ok = str(ospf_val.get("admin-state", "")).lower() == "enable"
             router_id_ok = router_id is not None and str(ospf_val.get("router-id")) == str(router_id)
-
             associated_ifaces = set()
             for area in ospf_val.get("area", []):
                 if str(area.get("area-id")) != str(area_id):
@@ -483,22 +578,35 @@ def detect_switch_drift(gc: gNMIclient, node_config: Dict[str, Any], intent_data
             expected_ifaces.update(
                 f"{vlan['port']}.{vlan['subinterface_index']}" for vlan in vlan_interfaces
             )
-
             if not expected_ifaces.issubset(associated_ifaces):
-                drift_reasons.append("OSPFv2 area/interface associations incomplete")
+                drift_reasons.append(
+                    f"OSPFv2 area/interface associations incomplete | "
+                    f"Current: {sorted(associated_ifaces)} | Expected: {sorted(expected_ifaces)}"
+                )
             if not admin_state_ok or not router_id_ok:
-                drift_reasons.append("OSPFv2 admin-state or router-id mismatch")
+                drift_reasons.append(
+                    f"OSPFv2 admin-state or router-id mismatch | "
+                    f"Current admin-state: {ospf_val.get('admin-state')} | "
+                    f"Expected admin-state: enable | Current router-id: {ospf_val.get('router-id')} | "
+                    f"Expected router-id: {router_id}"
+                )
 
     rogue_val = gnmi_get_value(gc, "/system/aaa/authentication/user[username=rogueadmin]")
     if rogue_val is not None:
-        drift_reasons.append("Unauthorized backdoor account 'rogueadmin' detected")
+        drift_reasons.append(
+            "Unauthorized backdoor account 'rogueadmin' detected | "
+            "Current: account exists | Expected: account absent"
+        )
 
     for vlan in vlan_interfaces:
-        port = vlan["port"]
-        idx = vlan["subinterface_index"]
+        port, idx = vlan["port"], vlan["subinterface_index"]
         vlan_val = gnmi_get_value(gc, f"/interface[name={port}]/subinterface[index={idx}]")
         if vlan_val is None:
-            drift_reasons.append(f"VLAN {vlan['vlan_id']} ({vlan['name']}) subinterface deleted")
+            drift_reasons.append(
+                f"VLAN {vlan['vlan_id']} ({vlan['name']}) subinterface deleted | "
+                f"Current: absent | Expected: configured subinterface {port}.{idx} "
+                f"with IP {vlan['gateway_ip']}"
+            )
         else:
             expected_ip = vlan["gateway_ip"]
             address_list = vlan_val.get("ipv4", {}).get("address", [])
@@ -507,9 +615,9 @@ def detect_switch_drift(gc: gNMIclient, node_config: Dict[str, Any], intent_data
             }
             if expected_ip not in actual_prefixes:
                 drift_reasons.append(
-                    f"VLAN {vlan['vlan_id']} ({vlan['name']}) subinterface IP misconfigured"
+                    f"VLAN {vlan['vlan_id']} ({vlan['name']}) subinterface IP misconfigured | "
+                    f"Current: {sorted(actual_prefixes)} | Expected: {expected_ip}"
                 )
-
     return drift_reasons
 
 
@@ -518,11 +626,11 @@ def detect_switch_drift(gc: gNMIclient, node_config: Dict[str, Any], intent_data
 # ============================================================
 
 def remediate_switch_drift(
-    node_config: Dict[str, Any], intent_data: Dict[str, Any], drift_reasons: List[str]
+    node_config: Dict[str, Any],
+    intent_data: Dict[str, Any],
+    drift_reasons: List[str],
 ) -> Tuple[bool, str]:
-    node_ip = node_config["management_ip"]
-    node_name = node_config["name"]
-
+    node_ip, node_name = node_config["management_ip"], node_config["name"]
     try:
         commands = render_remediation_commands(node_config, intent_data, drift_reasons)
         result = json_rpc_set(node_ip, commands)
@@ -534,15 +642,14 @@ def remediate_switch_drift(
 
 
 def verify_switch_compliance(
-    node_config: Dict[str, Any], intent_data: Dict[str, Any]
+    node_config: Dict[str, Any],
+    intent_data: Dict[str, Any],
 ) -> Tuple[bool, List[str], Optional[str]]:
     node_ip = node_config["management_ip"]
     try:
         with gNMIclient(
-            target=(node_ip, GNMI_PORT),
-            username=SRL_USERNAME,
-            password=SRL_PASSWORD,
-            skip_verify=True,
+            target=(node_ip, GNMI_PORT), username=SRL_USERNAME,
+            password=SRL_PASSWORD, skip_verify=True,
         ) as gc:
             reasons = detect_switch_drift(gc, node_config, intent_data)
         return not reasons, reasons, None
@@ -555,24 +662,30 @@ def verify_switch_compliance(
 # ============================================================
 
 def detect_alpine_drift(
-    ssh: ConnectHandler, node_config: Dict[str, Any], intent_data: Dict[str, Any]
+    ssh: ConnectHandler,
+    node_config: Dict[str, Any],
+    intent_data: Dict[str, Any],
 ) -> Dict[str, Any]:
     security = intent_data["global_settings"]["security"]
     expected_dns = intent_data["global_settings"]["linux_services"]["expected_dns"]
     authorized_users = set(security.get("authorized_users", [])) | {"root"}
-
     report = {
-        "reasons": [],
-        "dns_mismatch": False,
-        "vlan_missing": False,
-        "vlan_ip_wrong": False,
-        "unauthorized_accounts": [],
+        "reasons": [], "dns_mismatch": False, "vlan_missing": False,
+        "vlan_ip_wrong": False, "unauthorized_accounts": [],
     }
 
     dns_output = ssh.send_command("cat /etc/resolv.conf")
-    if expected_dns not in dns_output:
+    actual_nameservers = {
+        fields[1]
+        for line in dns_output.splitlines()
+        if len(fields := line.split()) >= 2 and fields[0] == "nameserver"
+    }
+    if str(expected_dns).strip() not in actual_nameservers:
         report["dns_mismatch"] = True
-        report["reasons"].append(f"DNS nameserver mismatch (expected {expected_dns})")
+        report["reasons"].append(
+            f"DNS nameserver mismatch | Current: {dns_output.strip()} | "
+            f"Expected: nameserver {expected_dns}"
+        )
 
     vlan_id = node_config["vlan_id"]
     if vlan_id:
@@ -580,13 +693,19 @@ def detect_alpine_drift(
         link_output = ssh.send_command(f"ip -o link show {vlan_iface} 2>&1")
         if not link_output.strip() or "does not exist" in link_output.lower():
             report["vlan_missing"] = True
-            report["reasons"].append(f"VLAN sub-interface {vlan_iface} missing")
+            report["reasons"].append(
+                f"VLAN sub-interface {vlan_iface} missing | Current: absent | "
+                f"Expected: {vlan_iface} with IP {node_config['vlan_ip']}"
+            )
         else:
             expected_ip = node_config["vlan_ip"]
             addr_output = ssh.send_command(f"ip -4 -o addr show {vlan_iface}")
             if expected_ip and expected_ip.split("/")[0] not in addr_output:
                 report["vlan_ip_wrong"] = True
-                report["reasons"].append(f"VLAN sub-interface {vlan_iface} IP misconfigured")
+                report["reasons"].append(
+                    f"VLAN sub-interface {vlan_iface} IP misconfigured | "
+                    f"Current: {addr_output.strip()} | Expected: {expected_ip}"
+                )
 
     passwd_output = ssh.send_command("cat /etc/passwd")
     for line in passwd_output.splitlines():
@@ -597,50 +716,69 @@ def detect_alpine_drift(
         if not uname or not uid_str.isdigit():
             continue
         uid = int(uid_str)
-        if (uid == 0 and uname != "root") or (uid >= 1000 and uname not in authorized_users):
+        # Alpine's standard "nobody" service account commonly uses UID 65534.
+        # It is a system identity, not an interactive user, and should not
+        # block unrelated automatic configuration remediation.
+        is_unexpected_root_account = uid == 0 and uname != "root"
+        is_unapproved_login_account = uid >= 1000 and uid < 60000 and uname not in authorized_users
+        if is_unexpected_root_account or is_unapproved_login_account:
             report["unauthorized_accounts"].append(uname)
 
     if report["unauthorized_accounts"]:
         report["reasons"].append(
-            "Unauthorized local account(s) detected: " + ", ".join(report["unauthorized_accounts"])
+            "Unauthorized local account(s) detected | Current: "
+            f"{', '.join(report['unauthorized_accounts'])} | Expected: authorized accounts only"
         )
-
     return report
 
 
 def remediate_alpine_drift(
-    ssh: ConnectHandler, node_config: Dict[str, Any], intent_data: Dict[str, Any], report: Dict[str, Any]
+    ssh: ConnectHandler,
+    node_config: Dict[str, Any],
+    intent_data: Dict[str, Any],
+    report: Dict[str, Any],
 ) -> Tuple[bool, str]:
-    node_name = node_config["name"]
-    actions = []
-
+    node_name, actions = node_config["name"], []
     try:
         if report["dns_mismatch"]:
             expected_dns = intent_data["global_settings"]["linux_services"]["expected_dns"]
             ssh.send_command(f"printf 'nameserver {expected_dns}\\n' > /etc/resolv.conf")
+            dns_after = ssh.send_command("cat /etc/resolv.conf")
+            actual_nameservers = {
+                fields[1]
+                for line in dns_after.splitlines()
+                if len(fields := line.split()) >= 2 and fields[0] == "nameserver"
+            }
+            if str(expected_dns).strip() not in actual_nameservers:
+                raise RuntimeError(
+                    f"DNS remediation verification failed; current resolver: {dns_after.strip()!r}"
+                )
             actions.append(f"DNS restored to {expected_dns}")
 
         if report["vlan_missing"] or report["vlan_ip_wrong"]:
-            vlan_id = node_config["vlan_id"]
-            vlan_ip = node_config["vlan_ip"]
-            vlan_gw = node_config["vlan_gw"]
+            vlan_id, vlan_ip, vlan_gw = (
+                node_config["vlan_id"], node_config["vlan_ip"], node_config["vlan_gw"]
+            )
             vlan_iface = f"eth1.{vlan_id}"
             ssh.send_command("ip link set eth1 up")
             ssh.send_command(
-                f"ip link add link eth1 name {vlan_iface} type vlan id {vlan_id} 2>/dev/null || true"
+                f"ip link add link eth1 name {vlan_iface} type vlan id {vlan_id} "
+                "2>/dev/null || true"
             )
             ssh.send_command(f"ip link set {vlan_iface} up")
             ssh.send_command(
-                f"ip addr flush dev {vlan_iface} 2>/dev/null || true; ip addr add {vlan_ip} dev {vlan_iface}"
+                f"ip addr flush dev {vlan_iface} 2>/dev/null || true; "
+                f"ip addr add {vlan_ip} dev {vlan_iface}"
             )
             ssh.send_command(f"ip route replace default via {vlan_gw} dev {vlan_iface}")
             actions.append(f"VLAN {vlan_iface} reconstructed")
 
+        # Security-related account findings are handled by manual review before
+        # this function is called. This loop remains for compatibility with reports.
         for account in report["unauthorized_accounts"]:
             if account != "root":
                 ssh.send_command(f"deluser {account} 2>/dev/null || true")
                 actions.append(f"Removed unauthorized account '{account}'")
-
         return True, "; ".join(actions) if actions else "Nothing actionable"
     except Exception as exc:
         logger.error("[REMEDIATION] %s failed: %s", node_name, exc)
@@ -648,23 +786,66 @@ def remediate_alpine_drift(
 
 
 def verify_alpine_compliance(
-    ssh: ConnectHandler, node_config: Dict[str, Any], intent_data: Dict[str, Any]
+    ssh: ConnectHandler,
+    node_config: Dict[str, Any],
+    intent_data: Dict[str, Any],
 ) -> Tuple[bool, List[str]]:
     report = detect_alpine_drift(ssh, node_config, intent_data)
     return not report["reasons"], report["reasons"]
 
 
 # ============================================================
-# Event handling
+# Incident and status reporting
 # ============================================================
 
-def send_incident(host: str, event_type: str, summary: str, details: str = "") -> None:
+def send_incident(
+    host: str,
+    event_type: str,
+    summary: str,
+    details: str = "",
+    masked_ip: str = "",
+    manual_review: bool = False,
+) -> bool:
+    """Send one incident payload to the existing Zabbix trapper item."""
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    manual_review_text = "YES" if manual_review else "NO"
     payload = (
-        f"<b>IBN {event_type}</b><br>"
-        f"{summary}"
-        + (f"<br>{details}" if details else "")
+        f"<b>IBN {html.escape(str(event_type))}</b><br>"
+        f"<b>Timestamp:</b> {timestamp}<br>"
+        f"<b>Masked IP:</b> {html.escape(str(masked_ip))}<br>"
+        f"<b>Manual Review Required:</b> {manual_review_text}<br>"
+        f"<b>Summary:</b> {html.escape(str(summary))}"
+        + (f"<br><b>Details:</b> {html.escape(str(details))}" if details else "")
     )
-    send_zabbix_trap(host, "ibn.incident_report", payload)
+    return send_zabbix_trap(host, "ibn.incident_report", payload)
+
+
+def send_incident_once(
+    host: str,
+    state: Dict[str, Any],
+    incident_key: str,
+    event_type: str,
+    summary: str,
+    details: str = "",
+    masked_ip: str = "",
+    manual_review: bool = False,
+) -> bool:
+    """
+    Suppress repeated sends for the same active incident. Mark it active only
+    when Zabbix accepts the trap; this confirms sender acceptance, not email
+    delivery by a downstream Zabbix action.
+    """
+    if is_incident_active(state, incident_key):
+        logger.info("[%s] Incident already active; suppressing duplicate", incident_key)
+        return False
+
+    accepted = send_incident(
+        host, event_type, summary, details,
+        masked_ip=masked_ip, manual_review=manual_review,
+    )
+    if accepted:
+        state.setdefault("active_incidents", set()).add(incident_key)
+    return accepted
 
 
 def send_status_metrics(
@@ -676,6 +857,8 @@ def send_status_metrics(
     telemetry_ok: bool = True,
     remediation_status: int = REMEDIATION_STATUS_NONE,
     last_event: str = "",
+    masked_ip: str = "",
+    drift_details: str = "",
 ) -> None:
     send_zabbix_metrics(
         host,
@@ -689,8 +872,20 @@ def send_status_metrics(
             "ibn.device.reachable": DEVICE_REACHABLE if reachable else DEVICE_UNREACHABLE,
             "ibn.telemetry.status": TELEMETRY_OK if telemetry_ok else TELEMETRY_FAILED,
             "ibn.last_event": last_event or state["state"],
+            "ibn.device.ip.masked": masked_ip,
+            "ibn.drift.details": drift_details,
         },
     )
+
+
+def requires_manual_review(reasons: List[str]) -> bool:
+    """Do not autonomously delete or modify potentially unauthorized accounts."""
+    security_markers = (
+        "unauthorized backdoor account",
+        "unauthorized privileged account",
+        "unauthorized local account",
+    )
+    return any(marker in reason.lower() for reason in reasons for marker in security_markers)
 
 
 def handle_compliance_result(
@@ -699,64 +894,86 @@ def handle_compliance_result(
     reasons: List[str],
     remediation_fn,
     verify_fn,
+    masked_ip: str = "",
 ) -> None:
-    """Common detect -> remediate -> verify state machine."""
+    """Detect -> remediate -> verify, with one alert per active incident class."""
+    drift_details = build_drift_details(reasons)
+
+    # A successful telemetry/reconciliation pass means previous reachability and
+    # telemetry incidents have cleared, regardless of whether drift remains.
+    clear_incident(state, INCIDENT_UNREACHABLE)
+    clear_incident(state, INCIDENT_TELEMETRY)
 
     if not reasons:
         was_problem = state["state"] != DEVICE_STATE_COMPLIANT
+        had_drift_alert = is_incident_active(state, INCIDENT_DRIFT)
+        had_security_alert = is_incident_active(state, INCIDENT_SECURITY_REVIEW)
+
         state["state"] = DEVICE_STATE_COMPLIANT
         state["remediation_attempts"] = 0
         state["finding_signature"] = None
         state["last_incident_signature"] = None
+        clear_incident(state, INCIDENT_DRIFT)
+        clear_incident(state, INCIDENT_SECURITY_REVIEW)
 
         send_status_metrics(
-            host,
-            state,
-            True,
-            0,
-            reachable=True,
-            telemetry_ok=True,
+            host, state, True, 0, reachable=True, telemetry_ok=True,
             remediation_status=(
-                REMEDIATION_STATUS_RECOVERED
-                if was_problem
+                REMEDIATION_STATUS_RECOVERED if was_problem
                 else REMEDIATION_STATUS_NONE
             ),
-            last_event=(
-                "Device recovered and is compliant"
-                if was_problem
-                else "Device compliant"
-            ),
+            last_event="Device recovered and is compliant" if was_problem else "Device compliant",
+            masked_ip=masked_ip,
+            drift_details=build_drift_details([]),
         )
 
-        if was_problem:
-            send_incident(
-                host,
-                "RECOVERY",
-                "Device is compliant again; remediation cycle closed.",
-            )
+        # Recovery is reflected in Zabbix status metrics; do not send a second email.
         return
 
     signature = finding_signature(reasons)
-    new_finding = signature != state.get("finding_signature")
+    state["finding_signature"] = signature
 
-    # Do not reset remediation_attempts when a persistent finding changes
-    # wording or gains/loses a secondary reason. The counter is reset only
-    # after the device has actually returned to compliance.
-    if new_finding:
-        state["finding_signature"] = signature
-
-    if state["state"] == DEVICE_STATE_MANUAL:
+    # Security findings are not automatically remediated. Raise a single
+    # manual-review incident instead of sending both drift and security emails.
+    if requires_manual_review(reasons):
+        state["state"] = DEVICE_STATE_MANUAL
         send_status_metrics(
-            host,
-            state,
-            False,
-            len(reasons),
-            reachable=True,
-            telemetry_ok=True,
+            host, state, False, len(reasons), reachable=True, telemetry_ok=True,
             remediation_status=REMEDIATION_STATUS_MANUAL_REVIEW,
-            last_event="Manual review required",
+            last_event="Security finding requires manual review",
+            masked_ip=masked_ip,
+            drift_details=drift_details,
+        )
+        send_incident_once(
+            host, state, INCIDENT_SECURITY_REVIEW,
+            "SECURITY REVIEW REQUIRED",
+            "Potentially unauthorized account detected; autonomous remediation was withheld.",
+            signature,
+            masked_ip=masked_ip,
+            manual_review=True,
         )
         return
+
+    # Once an ordinary drift has reached the manual-review state, do not keep
+    # trying the same automatic remediation on every polling cycle.
+    if state["state"] == DEVICE_STATE_MANUAL:
+        send_status_metrics(
+            host, state, False, len(reasons), reachable=True, telemetry_ok=True,
+            remediation_status=REMEDIATION_STATUS_MANUAL_REVIEW,
+            last_event="Manual review required",
+            masked_ip=masked_ip,
+            drift_details=drift_details,
+        )
+        return
+
+    # Only the initial active drift event creates an incident notification.
+    send_incident_once(
+        host, state, INCIDENT_DRIFT,
+        "CONFIGURATION DRIFT DETECTED",
+        "The observed device state differs from the intended configuration.",
+        signature,
+        masked_ip=masked_ip,
+    )
 
     state["state"] = DEVICE_STATE_DRIFT
     state["remediation_attempts"] += 1
@@ -765,60 +982,37 @@ def handle_compliance_result(
     if attempt > MAX_REMEDIATION_ATTEMPTS:
         state["state"] = DEVICE_STATE_MANUAL
         send_status_metrics(
-            host,
-            state,
-            False,
-            len(reasons),
-            reachable=True,
-            telemetry_ok=True,
+            host, state, False, len(reasons), reachable=True, telemetry_ok=True,
             remediation_status=REMEDIATION_STATUS_MANUAL_REVIEW,
-            last_event="Autonomous remediation suspended",
+            last_event="Autonomous remediation suspended after retry limit",
+            masked_ip=masked_ip,
+            drift_details=drift_details,
         )
-
-        if state.get("last_incident_signature") != "MANUAL_REVIEW":
-            send_incident(
-                host,
-                "MANUAL REVIEW",
-                "Autonomous remediation suspended.",
-                f"Persistent drift: {signature}. Attempts: {MAX_REMEDIATION_ATTEMPTS}.",
-            )
-            state["last_incident_signature"] = "MANUAL_REVIEW"
+        # No second email: the original drift incident remains the active alert.
         return
-
-    if new_finding:
-        send_incident(
-            host,
-            "DRIFT DETECTED",
-            "The observed state differs from intent.",
-            f"{signature}. Starting remediation attempt {attempt}/{MAX_REMEDIATION_ATTEMPTS}.",
-        )
 
     state["state"] = DEVICE_STATE_REMEDIATING
     send_status_metrics(
-        host,
-        state,
-        False,
-        len(reasons),
-        reachable=True,
-        telemetry_ok=True,
+        host, state, False, len(reasons), reachable=True, telemetry_ok=True,
         remediation_status=REMEDIATION_STATUS_IN_PROGRESS,
         last_event=f"Remediation attempt {attempt}",
+        masked_ip=masked_ip,
+        drift_details=drift_details,
     )
 
     applied, action_text = remediation_fn()
-
     if not applied:
         send_status_metrics(
-            host,
-            state,
-            False,
-            len(reasons),
-            reachable=True,
-            telemetry_ok=True,
+            host, state, False, len(reasons), reachable=True, telemetry_ok=True,
             remediation_status=REMEDIATION_STATUS_FAILED,
-            last_event="Remediation failed",
+            last_event="Remediation failed; drift incident remains active",
+            masked_ip=masked_ip,
+            drift_details=drift_details,
         )
-        send_incident(host, "REMEDIATION FAILED", action_text, signature)
+        logger.error(
+            "[REMEDIATION] %s: %s. Suppressing separate email; drift incident is active.",
+            host, action_text,
+        )
         return
 
     time.sleep(REMEDIATION_VERIFY_DELAY)
@@ -829,112 +1023,155 @@ def handle_compliance_result(
         state["remediation_attempts"] = 0
         state["finding_signature"] = None
         state["last_incident_signature"] = None
+        had_drift_alert = is_incident_active(state, INCIDENT_DRIFT)
+        clear_incident(state, INCIDENT_DRIFT)
 
         send_status_metrics(
-            host,
-            state,
-            True,
-            0,
-            reachable=True,
-            telemetry_ok=True,
+            host, state, True, 0, reachable=True, telemetry_ok=True,
             remediation_status=REMEDIATION_STATUS_RECOVERED,
             last_event="Remediation verified successfully",
+            masked_ip=masked_ip,
+            drift_details=build_drift_details([]),
         )
-        send_incident(
-            host,
-            "REMEDIATION RECOVERED",
-            "Desired state verified after remediation.",
-            action_text,
-        )
+        # Remediation recovery is reflected in Zabbix status metrics; no extra email.
         return
 
+    # A failed verification is recorded in Zabbix metrics/logs but does not
+    # generate another email while the original drift incident is active.
     state["state"] = DEVICE_STATE_DRIFT
-    failed_count = len(verification_reasons) or len(reasons)
-
+    failed_reasons = verification_reasons or reasons
     send_status_metrics(
-        host,
-        state,
-        False,
-        failed_count,
-        reachable=True,
-        telemetry_ok=True,
+        host, state, False, len(failed_reasons), reachable=True, telemetry_ok=True,
         remediation_status=REMEDIATION_STATUS_FAILED,
-        last_event="Remediation did not converge",
+        last_event=(
+            "Remediation verification failed"
+            if verify_error else "Remediation did not converge"
+        ),
+        masked_ip=masked_ip,
+        drift_details=build_drift_details(failed_reasons),
     )
-
     if verify_error:
-        send_incident(
-            host,
-            "VERIFICATION FAILED",
-            "Could not verify the remediation result.",
-            verify_error,
+        logger.error("[VERIFY] %s: %s", host, verify_error)
+    else:
+        logger.warning(
+            "[VERIFY] %s still has drift after remediation: %s",
+            host, finding_signature(verification_reasons),
+        )
+
+
+# ============================================================
+# Monitoring loops
+# ============================================================
+
+def report_management_failure(
+    host: str,
+    state: Dict[str, Any],
+    node_ip: str,
+    error: Exception,
+    service_name: str,
+    service_port: int,
+    secondary_port: Optional[int] = None,
+) -> None:
+    failure_state = classify_management_failure(node_ip, service_port, secondary_port)
+    masked_ip = mask_ip_address(node_ip)
+    detail = f"{service_name} monitoring failed | Current: {error}"
+
+    if failure_state == DEVICE_STATE_UNREACHABLE:
+        state["state"] = DEVICE_STATE_UNREACHABLE
+        clear_incident(state, INCIDENT_TELEMETRY)
+        send_status_metrics(
+            host, state, False, 0, reachable=False, telemetry_ok=False,
+            remediation_status=REMEDIATION_STATUS_NONE,
+            last_event="Device unreachable",
+            masked_ip=masked_ip,
+            drift_details=f"Device appears unreachable | {detail}",
+        )
+        send_incident_once(
+            host, state, INCIDENT_UNREACHABLE,
+            "DEVICE UNREACHABLE",
+            "The device cannot be reached through the tested management paths.",
+            detail,
+            masked_ip=masked_ip,
         )
     else:
-        new_signature = finding_signature(verification_reasons)
-        if new_signature != signature:
-            state["finding_signature"] = new_signature
-        send_incident(
-            host,
-            "REMEDIATION DID NOT CONVERGE",
-            "The device still differs from intent after the write.",
-            new_signature or signature,
+        state["state"] = DEVICE_STATE_TELEMETRY_ERROR
+        clear_incident(state, INCIDENT_UNREACHABLE)
+        drift_already_alerted = is_incident_active(state, INCIDENT_DRIFT)
+        send_status_metrics(
+            host, state, False, 0, reachable=True, telemetry_ok=False,
+            remediation_status=REMEDIATION_STATUS_NONE,
+            last_event=f"{service_name} telemetry/management failure",
+            masked_ip=masked_ip,
+            drift_details=f"Device responds, but monitoring access failed | {detail}",
         )
+        if drift_already_alerted:
+            logger.warning(
+                "[ALERTING] Suppressing separate telemetry email for %s because "
+                "a configuration-drift incident is already active. Details: %s",
+                host, detail,
+            )
+        else:
+            send_incident_once(
+                host, state, INCIDENT_TELEMETRY,
+                "TELEMETRY ERROR",
+                f"The device appears reachable, but {service_name} monitoring failed.",
+                detail,
+                masked_ip=masked_ip,
+            )
 
 
-def monitor_switch_telemetry(device: Dict[str, Any], intent_data: Dict[str, Any], day0_data: Dict[str, Any]) -> None:
+def monitor_switch_telemetry(
+    device: Dict[str, Any],
+    intent_data: Dict[str, Any],
+    day0_data: Dict[str, Any],
+) -> None:
     node_config = build_node_config(device, day0_data)
-    node_ip = node_config["management_ip"]
-    node_name = node_config["name"]
+    node_ip, node_name = node_config["management_ip"], node_config["name"]
     state = get_device_state(node_name)
+    masked_ip = mask_ip_address(node_ip)
 
     if not node_config["router_id"]:
         logger.warning("[CONFIG] %s has no day-0 router-id", node_name)
 
     try:
         with gNMIclient(
-            target=(node_ip, GNMI_PORT),
-            username=SRL_USERNAME,
-            password=SRL_PASSWORD,
-            skip_verify=True,
+            target=(node_ip, GNMI_PORT), username=SRL_USERNAME,
+            password=SRL_PASSWORD, skip_verify=True,
         ) as gc:
             drift_reasons = detect_switch_drift(gc, node_config, intent_data)
             metrics = collect_switch_metrics(gc, node_ip)
 
+        clear_incident(state, INCIDENT_UNREACHABLE)
+        clear_incident(state, INCIDENT_TELEMETRY)
         if metrics:
             send_zabbix_metrics(node_name, metrics)
 
         handle_compliance_result(
-            node_name,
-            state,
-            drift_reasons,
-            remediation_fn=lambda: remediate_switch_drift(node_config, intent_data, drift_reasons),
+            node_name, state, drift_reasons,
+            remediation_fn=lambda: remediate_switch_drift(
+                node_config, intent_data, drift_reasons
+            ),
             verify_fn=lambda: verify_switch_compliance(node_config, intent_data),
+            masked_ip=masked_ip,
         )
-
     except Exception as exc:
-        state["state"] = DEVICE_STATE_TELEMETRY_ERROR
-        logger.error("[gNMI] Telemetry/reconciliation failed for %s: %s", node_name, exc)
-        send_status_metrics(
-            node_name,
-            state,
-            False,
-            0,
-            reachable=False,
-            telemetry_ok=False,
-            remediation_status=REMEDIATION_STATUS_NONE,
-            last_event="gNMI telemetry failure",
+        logger.error("[gNMI] Monitoring failed for %s: %s", node_name, exc)
+        report_management_failure(
+            node_name, state, node_ip, exc,
+            service_name="gNMI", service_port=GNMI_PORT,
+            secondary_port=JSON_RPC_PORT,
         )
-        if state.get("last_incident_signature") != "TELEMETRY_ERROR":
-            send_incident(node_name, "TELEMETRY ERROR", "gNMI reconciliation failed.", str(exc))
-            state["last_incident_signature"] = "TELEMETRY_ERROR"
 
 
-def monitor_alpine_node(device: Dict[str, Any], intent_data: Dict[str, Any], linux_init_data: Dict[str, Any]) -> None:
+def monitor_alpine_node(
+    device: Dict[str, Any],
+    intent_data: Dict[str, Any],
+    linux_init_data: Dict[str, Any],
+) -> None:
     node_config = build_alpine_node_config(device, linux_init_data)
-    node_ip = node_config["management_ip"]
-    node_name = node_config["name"]
+    node_ip, node_name = node_config["management_ip"], node_config["name"]
     state = get_device_state(node_name)
-
+    masked_ip = mask_ip_address(node_ip)
     alpine_device = {
         "device_type": "linux",
         "host": node_ip,
@@ -950,32 +1187,21 @@ def monitor_alpine_node(device: Dict[str, Any], intent_data: Dict[str, Any], lin
                 send_zabbix_metrics(node_name, metrics)
 
             report = detect_alpine_drift(ssh, node_config, intent_data)
-
+            clear_incident(state, INCIDENT_UNREACHABLE)
+            clear_incident(state, INCIDENT_TELEMETRY)
             handle_compliance_result(
-                node_name,
-                state,
-                report["reasons"],
-                remediation_fn=lambda: remediate_alpine_drift(ssh, node_config, intent_data, report),
-                verify_fn=lambda: verify_alpine_compliance(ssh, node_config, intent_data),
+                node_name, state, report["reasons"],
+                remediation_fn=lambda: remediate_alpine_drift(
+                    ssh, node_config, intent_data, report
+                ),
+                verify_fn=lambda: verify_alpine_compliance(
+                    ssh, node_config, intent_data
+                ),
+                masked_ip=masked_ip,
             )
-
     except Exception as exc:
-        state["state"] = DEVICE_STATE_UNREACHABLE
-        logger.error("[SSH] Monitoring failed for %s: %s", node_name, exc)
-        send_status_metrics(
-            node_name,
-            state,
-            False,
-            0,
-            reachable=False,
-            telemetry_ok=False,
-            remediation_status=REMEDIATION_STATUS_NONE,
-            last_event="SSH monitoring failure",
-        )
-        if state.get("last_incident_signature") != "UNREACHABLE":
-            send_incident(node_name, "ENDPOINT UNREACHABLE", "SSH monitoring failed.", str(exc))
-            state["last_incident_signature"] = "UNREACHABLE"
-
+        logger.error("[SSH] Monitoring failed for %s: %s", node_name, node_ip)
+        report_management_failure(node_name, state, node_ip, exc, service_name="SSH", service_port=22)
 
 # ============================================================
 # Main loop
@@ -984,10 +1210,8 @@ def monitor_alpine_node(device: Dict[str, Any], intent_data: Dict[str, Any], lin
 def run_engine() -> None:
     logger.info(
         "Starting Autonomous Tier-1 IBN Drift Engine | poll=%ss | max_attempts=%s",
-        POLL_INTERVAL,
-        MAX_REMEDIATION_ATTEMPTS,
+        POLL_INTERVAL, MAX_REMEDIATION_ATTEMPTS,
     )
-
     while True:
         try:
             intent = load_intent()
@@ -1003,7 +1227,6 @@ def run_engine() -> None:
                     monitor_alpine_node(device, intent, linux_init)
 
             time.sleep(POLL_INTERVAL)
-
         except Exception as exc:
             logger.error("[ENGINE] Failure: %s", exc)
             time.sleep(10)
