@@ -1,8 +1,9 @@
 version: "3.8"
 
 networks:
-  ibn_mgmt:
+  ibn_net:
     external: true
+    name: ibn_net
 
 services:
   postgres-server:
@@ -16,7 +17,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     networks:
-      ibn_mgmt:
+      ibn_net:
         ipv4_address: 172.16.99.105
 
   zabbix-server:
@@ -36,7 +37,7 @@ services:
       - postgres-server
       - zabbix-web-service
     networks:
-      ibn_mgmt:
+      ibn_net:
         ipv4_address: 172.16.99.106
 
   zabbix-web:
@@ -54,7 +55,7 @@ services:
     depends_on:
       - zabbix-server
     networks:
-      ibn_mgmt:
+      ibn_net:
         ipv4_address: 172.16.99.107
 
   zabbix-web-service:
@@ -64,7 +65,7 @@ services:
     environment:
       - ZBX_ALLOWEDIP=172.16.99.106
     networks:
-      ibn_mgmt:
+      ibn_net:
         ipv4_address: 172.16.99.108
 
   autonomous-controller:
@@ -85,7 +86,7 @@ services:
     volumes:
       - ./:/opt/controller
     networks:
-      ibn_mgmt:
+      ibn_net:
         ipv4_address: 172.16.99.102
     depends_on:
       - zabbix-server

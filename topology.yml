@@ -1,7 +1,7 @@
 name: enterprise-core-lab
 
 mgmt:
-  network: ibn_mgmt
+  network: ibn_net
   ipv4-subnet: 172.16.99.0/24
 
 topology:
