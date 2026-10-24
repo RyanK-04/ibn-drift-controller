@@ -6,6 +6,13 @@ mgmt:
 
 topology:
 
+  kinds:
+    nokia_srlinux:
+      image: ghcr.io/nokia/srlinux:25.10.1
+      type: ixr-d2l
+      enforce-startup-config: true
+      startup-config: configs/__clabNodeName__.cfg
+
   nodes:
 
     # ========================================================
@@ -13,16 +20,8 @@ topology:
     # ========================================================
 
     core-srl-1:
-
       kind: nokia_srlinux
-
-      image: ghcr.io/nokia/srlinux:25.10.1
-
-      type: ixr-d2l
-
       mgmt-ipv4: 172.16.99.2
-
-      startup-config: configs/core-srl-1.cfg
 
 
     # ========================================================
@@ -30,16 +29,8 @@ topology:
     # ========================================================
 
     core-srl-2:
-
       kind: nokia_srlinux
-
-      image: ghcr.io/nokia/srlinux:25.10.1
-
-      type: ixr-d2l
-
       mgmt-ipv4: 172.16.99.3
-
-      startup-config: configs/core-srl-2.cfg
 
 
     # ========================================================
@@ -47,16 +38,8 @@ topology:
     # ========================================================
 
     dist-srl-1:
-
       kind: nokia_srlinux
-
-      image: ghcr.io/nokia/srlinux:25.10.1
-
-      type: ixr-d2l
-
       mgmt-ipv4: 172.16.99.4
-
-      startup-config: configs/dist-srl-1.cfg
 
 
     # ========================================================
@@ -64,16 +47,8 @@ topology:
     # ========================================================
 
     dist-srl-2:
-
       kind: nokia_srlinux
-
-      image: ghcr.io/nokia/srlinux:25.10.1
-
-      type: ixr-d2l
-
       mgmt-ipv4: 172.16.99.5
-
-      startup-config: configs/dist-srl-2.cfg
 
 
     # ========================================================
@@ -81,21 +56,13 @@ topology:
     # ========================================================
 
     transaction-terminal:
-
       kind: linux
-
       image: alpine:latest
-
       mgmt-ipv4: 172.16.99.6
-
       binds:
-
         - provisioning/client-static-init.yml:/tmp/init.yml:ro
-
         - provisioning/alpine-init.sh:/tmp/alpine-init.sh:ro
-
       exec:
-
         - sh /tmp/alpine-init.sh transaction-terminal
 
 
@@ -104,21 +71,13 @@ topology:
     # ========================================================
 
     desktop-workstation:
-
       kind: linux
-
       image: alpine:latest
-
       mgmt-ipv4: 172.16.99.7
-
       binds:
-
         - provisioning/client-static-init.yml:/tmp/init.yml:ro
-
         - provisioning/alpine-init.sh:/tmp/alpine-init.sh:ro
-
       exec:
-
         - sh /tmp/alpine-init.sh desktop-workstation
 
 
@@ -127,21 +86,13 @@ topology:
     # ========================================================
 
     application-server:
-
       kind: linux
-
       image: alpine:latest
-
       mgmt-ipv4: 172.16.99.8
-
       binds:
-
         - provisioning/client-static-init.yml:/tmp/init.yml:ro
-
         - provisioning/alpine-init.sh:/tmp/alpine-init.sh:ro
-
       exec:
-
         - sh /tmp/alpine-init.sh application-server
 
 
@@ -152,44 +103,24 @@ topology:
   links:
 
     # Core-to-core
-    - endpoints:
-        - "core-srl-1:e1-1"
-        - "core-srl-2:e1-1"
+    - endpoints: ["core-srl-1:e1-1", "core-srl-2:e1-1"]
 
     # Core 1 to distribution
-    - endpoints:
-        - "core-srl-1:e1-2"
-        - "dist-srl-1:e1-1"
-
-    - endpoints:
-        - "core-srl-1:e1-3"
-        - "dist-srl-2:e1-1"
+    - endpoints: ["core-srl-1:e1-2", "dist-srl-1:e1-1"]
+    - endpoints: ["core-srl-1:e1-3", "dist-srl-2:e1-1"]
 
     # Core 2 to distribution
-    - endpoints:
-        - "core-srl-2:e1-2"
-        - "dist-srl-1:e1-2"
-
-    - endpoints:
-        - "core-srl-2:e1-3"
-        - "dist-srl-2:e1-2"
+    - endpoints: ["core-srl-2:e1-2", "dist-srl-1:e1-2"]
+    - endpoints: ["core-srl-2:e1-3", "dist-srl-2:e1-2"]
 
     # Distribution interconnect
-    - endpoints:
-        - "dist-srl-1:e1-3"
-        - "dist-srl-2:e1-3"
+    - endpoints: ["dist-srl-1:e1-3", "dist-srl-2:e1-3"]
 
     # Transaction terminal
-    - endpoints:
-        - "transaction-terminal:eth1"
-        - "dist-srl-1:e1-4"
+    - endpoints: ["transaction-terminal:eth1", "dist-srl-1:e1-4"]
 
     # Desktop workstation
-    - endpoints:
-        - "desktop-workstation:eth1"
-        - "dist-srl-1:e1-5"
+    - endpoints: ["desktop-workstation:eth1", "dist-srl-1:e1-5"]
 
     # Application server
-    - endpoints:
-        - "application-server:eth1"
-        - "dist-srl-2:e1-4"
+    - endpoints: ["application-server:eth1", "dist-srl-2:e1-4"]
