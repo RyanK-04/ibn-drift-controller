@@ -1,10 +1,14 @@
-enter candidate
-
 # ============================================================
 # System Naming
 # ============================================================
 
 set / system name host-name {{ hostname }}
+
+# ============================================================
+# Login Banner
+# ============================================================
+
+set / system banner login-banner "AUTHORIZED ENTERPRISE ACCESS ONLY"
 
 # ============================================================
 # Management and APIs
@@ -27,12 +31,10 @@ set / system json-rpc-server network-instance mgmt http port 80
 # ============================================================
 
 {% for iface, ip in interfaces.items() %}
-
 set / interface {{ iface }} admin-state enable
 set / interface {{ iface }} subinterface 0 admin-state enable
 set / interface {{ iface }} subinterface 0 ipv4 admin-state enable
 set / interface {{ iface }} subinterface 0 ipv4 address {{ ip }}
-
 {% endfor %}
 
 # ============================================================
@@ -40,19 +42,14 @@ set / interface {{ iface }} subinterface 0 ipv4 address {{ ip }}
 # ============================================================
 
 {% for vlan in vlan_interfaces %}
-
 # VLAN {{ vlan.vlan_id }} - {{ vlan.description }}
 set / interface {{ vlan.port }} admin-state enable
 set / interface {{ vlan.port }} vlan-tagging true
-
 set / interface {{ vlan.port }} subinterface {{ vlan.subinterface_index }} admin-state enable
 set / interface {{ vlan.port }} subinterface {{ vlan.subinterface_index }} type routed
-
 set / interface {{ vlan.port }} subinterface {{ vlan.subinterface_index }} vlan encap single-tagged vlan-id {{ vlan.vlan_id }}
-
 set / interface {{ vlan.port }} subinterface {{ vlan.subinterface_index }} ipv4 admin-state enable
 set / interface {{ vlan.port }} subinterface {{ vlan.subinterface_index }} ipv4 address {{ vlan.gateway_ip }}
-
 {% endfor %}
 
 # ============================================================
@@ -84,10 +81,3 @@ set / network-instance default protocols ospf instance default area 0.0.0.0 inte
 {% for vlan in vlan_interfaces %}
 set / network-instance default protocols ospf instance default area 0.0.0.0 interface {{ vlan.port }}.{{ vlan.subinterface_index }} passive true
 {% endfor %}
-
-# ============================================================
-# Commit and save
-# ============================================================
-
-commit save
-

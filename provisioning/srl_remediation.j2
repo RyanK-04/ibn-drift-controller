@@ -8,10 +8,18 @@
       "entry": [
         {
           "sequence-id": 10,
-          "action": {"drop": {}},
+          "action": {
+            "drop": {}
+          },
           "match": {
-            "ipv4": {"protocol": 6},
-            "transport": {"destination-port": {"value": {{ drop_port }}}}
+            "ipv4": {
+              "protocol": 6
+            },
+            "transport": {
+              "destination-port": {
+                "value": {{ drop_port }}
+              }
+            }
           }
         }
       ]
@@ -57,7 +65,9 @@
   {
     "action": "update",
     "path": "/network-instance[name=default]/interface",
-    "value": {"name": "{{ iface }}.0"}
+    "value": {
+      "name": "{{ iface }}.0"
+    }
   }
 {% endfor %}
 {% if vlan_interfaces %}
@@ -73,21 +83,44 @@
 {% endif %}
 {% for vlan in vlan_interfaces %}
   ,
-  { "action": "update", "path": "/interface[name={{ vlan.port }}]/admin-state", "value": "enable" },
-  { "action": "update", "path": "/interface[name={{ vlan.port }}]/vlan-tagging", "value": true },
-  { "action": "update", "path": "/interface[name={{ vlan.port }}]/subinterface[index={{ vlan.subinterface_index }}]/admin-state", "value": "enable" },
-  { "action": "update", "path": "/interface[name={{ vlan.port }}]/subinterface[index={{ vlan.subinterface_index }}]/type", "value": "routed" },
-  { "action": "update", "path": "/interface[name={{ vlan.port }}]/subinterface[index={{ vlan.subinterface_index }}]/vlan/encap/single-tagged/vlan-id", "value": {{ vlan.vlan_id }} },
-  { "action": "update", "path": "/interface[name={{ vlan.port }}]/subinterface[index={{ vlan.subinterface_index }}]/ipv4/admin-state", "value": "enable" },
+  {
+    "action": "update",
+    "path": "/interface[name={{ vlan.port }}]/vlan-tagging",
+    "value": true
+  },
+  {
+    "action": "update",
+    "path": "/interface[name={{ vlan.port }}]/subinterface[index={{ vlan.subinterface_index }}]/admin-state",
+    "value": "enable"
+  },
+  {
+    "action": "update",
+    "path": "/interface[name={{ vlan.port }}]/subinterface[index={{ vlan.subinterface_index }}]/type",
+    "value": "routed"
+  },
+  {
+    "action": "update",
+    "path": "/interface[name={{ vlan.port }}]/subinterface[index={{ vlan.subinterface_index }}]/vlan/encap/single-tagged/vlan-id",
+    "value": {{ vlan.vlan_id }}
+  },
+  {
+    "action": "update",
+    "path": "/interface[name={{ vlan.port }}]/subinterface[index={{ vlan.subinterface_index }}]/ipv4/admin-state",
+    "value": "enable"
+  },
   {
     "action": "replace",
     "path": "/interface[name={{ vlan.port }}]/subinterface[index={{ vlan.subinterface_index }}]/ipv4/address[ip-prefix={{ vlan.gateway_ip }}]",
-    "value": {"ip-prefix": "{{ vlan.gateway_ip }}"}
+    "value": {
+      "ip-prefix": "{{ vlan.gateway_ip }}"
+    }
   },
   {
     "action": "update",
     "path": "/network-instance[name=default]/interface",
-    "value": {"name": "{{ vlan.port }}.{{ vlan.subinterface_index }}"}
+    "value": {
+      "name": "{{ vlan.port }}.{{ vlan.subinterface_index }}"
+    }
   }
 {% endfor %}
 {% if purge_backdoor %}
