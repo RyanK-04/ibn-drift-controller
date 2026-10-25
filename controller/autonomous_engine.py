@@ -354,6 +354,22 @@ def measure_latency_ms(ip: str) -> Optional[float]:
 def collect_switch_metrics(gc: gNMIclient, node_ip: str) -> Dict[str, Any]:
     metrics: Dict[str, Any] = {}
 
+    # Read the SR Linux control-processor CPU 1-minute average and publish it
+    # through the existing Zabbix item key.
+    cpu_util = gnmi_get_value(
+        gc,
+        f"/platform/control[slot={SRL_CONTROL_SLOT}]/cpu[index=all]/total/average-1",
+    )
+    if cpu_util is not None:
+        try:
+            metrics["ibn.metrics.cpu_utilization_percent"] = round(
+                max(0.0, min(100.0, float(cpu_util))), 2
+            )
+        except (TypeError, ValueError):
+            logger.warning(
+                "[METRICS] Unrecognized CPU utilization value: %r", cpu_util
+            )
+
     mem_util = gnmi_get_value(
         gc, f"/platform/control[slot={SRL_CONTROL_SLOT}]/memory/utilization"
     )
