@@ -359,7 +359,7 @@ http://localhost:8082
 
 If the lab runs on a remote host, replace `localhost` with the reachable address of that host.
 
-Sign in using the credentials configured for the Zabbix deployment. Do not publish default or private credentials in the repository or screenshots.
+Sign in using the credentials configured for the Zabbix deployment.
 
 ### Zabbix dashboard
 
