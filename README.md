@@ -4,7 +4,7 @@
 
 ### Intent-Based Networking for Configuration Drift Detection and Automated Remediation
 
-An autonomous controller for monitoring network infrastructure and Linux endpoints, detecting deviations from a defined operational intent, and restoring supported configurations in a controlled Containerlab environment.
+An autonomous controller for monitoring network infrastructure and Linux endpoints, detecting deviations from a defined operational intent and restoring supported configurations in a controlled Containerlab environment.
 
 ![Python](https://img.shields.io/badge/Python-3.11-blue?logo=python&logoColor=white)
 ![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)
