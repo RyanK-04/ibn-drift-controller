@@ -30,7 +30,7 @@ switches:
     # Each Linux endpoint gets its own dedicated VLAN, single-homed to whichever
     # distribution switch it is physically wired to in topology.yml. There is no
     # VRRP here: a per-host VLAN only exists behind one switch, so there is
-    # nothing to fail over between - unlike the old single shared vlan_interface.
+    # nothing to fail over between
     vlan_interfaces:
       - name: atm
         description: "ATM (transaction-terminal)"
