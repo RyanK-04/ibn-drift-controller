@@ -249,7 +249,6 @@ ibn-drift-controller/
 | `.gitignore` | Files and local artefacts excluded from Git |
 | `LICENSE` | Project licence: Apache License, Version 2.0 |
 | `docker-compose.yml` | Controller and monitoring service definitions |
-| `image.png` | Additional project image |
 | `topology.yml` | Containerlab topology definition |
 | `start-lab.sh` | Generates configurations and starts the lab |
 | `stop-lab.sh` | Stops the lab |
