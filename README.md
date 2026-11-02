@@ -33,6 +33,8 @@ An autonomous controller for monitoring network infrastructure and Linux endpoin
 - [Deploying the Lab](#deploying-the-lab)
 - [Monitoring Interface](#monitoring-interface)
 - [Demonstration and Validation](#demonstration-and-validation)
+  - [Manual Review Required](#manual-review-required)
+  - [Combined Automated and Manual-Review Drifts](#combined-automated-and-manual-review-drifts)
 - [Screenshots](#screenshots)
 - [Stopping the Lab](#stopping-the-lab)
 - [Security Considerations](#security-considerations)
@@ -216,6 +218,10 @@ ibn-drift-controller/
 ├── images/
 │   ├── AlertEmail.png
 │   ├── RemediatedEmail.png
+│   ├── Manual_Review.png
+│   ├── Manual_Review_Remediation.png
+│   ├── Combined_Email_Alerts.png
+│   ├── Combined_Email_Alerts_Remediation.png
 │   ├── SystemArchitecture.png
 │   └── Zabbix Dashboard.png
 ├── .env.example
@@ -259,7 +265,7 @@ Prepare a Linux host with the following tools:
 - Git.
 - `sudo` access for Containerlab deployment.
 
-The host must have sufficient CPU, memory and disk resources to run the network nodes and monitoring containers.
+The host must have sufficient CPU, memory and disk resources to run the network nodes and monitoring containers, preferrably a RAM allocation of 16GB and more.
 
 Refer to the official installation documentation:
 
@@ -403,6 +409,53 @@ The project includes a notification associated with the remediation workflow.
 
 *Figure 4. Email notification associated with the remediation workflow.*
 
+### Manual Review Required
+
+Some detected configuration drifts are not handled by the controller's automatic remediation logic. These conditions are reported for investigation and corrective action by a network engineer.
+
+When a drift requires manual review:
+
+1. The controller detects the deviation from the declared intent.
+2. The condition is identified as requiring manual review rather than being automatically changed.
+3. The network engineer examines the alert and determines the appropriate corrective action.
+4. The engineer applies the required correction to the affected device or endpoint.
+5. The resulting configuration is checked against the declared intent.
+
+The following images show an example of a drift alert that requires manual intervention and the subsequent manual remediation.
+
+![Manual review required alert](images/Manual_Review.png)
+
+*Figure 5. Alert identifying a configuration drift that requires review by a network engineer.*
+
+![Manual review remediation](images/Manual_Review_Remediation.png)
+
+*Figure 6. Notification or evidence associated with the manual remediation of the identified drift.*
+
+### Combined Automated and Manual-Review Drifts
+
+A single detection cycle may identify a combination of drift conditions: Some can be remediated automatically by the controller while others require intervention by a network engineer.
+
+In this combined-drift workflow:
+
+1. The controller detects and reports the combined drift conditions.
+2. The `manual_review_required` value is set to `0` when the combined alerts are discovered.
+3. The controller proceeds with remediation of the drift conditions supported by its automatic remediation logic.
+4. The remaining drift conditions that require manual review are left for the network engineer to investigate and correct.
+5. While those manual-review conditions remain unresolved, the system is reported as **Partial Remediation - Manual Review Still Required**.
+6. The final remediated email is sent only after the network engineer has corrected the outstanding manual-review drifts.
+
+The `manual_review_required` value being set to `0` at the combined-alert stage does not, by itself, mean that all detected drifts require manual review. The outstanding manual-review conditions must still be addressed before the workflow reaches its completed remediation state and the final remediated email is sent.
+
+The following images illustrate the combined alert and the subsequent remediation notification.
+
+![Combined automated and manual-review drift alerts](images/Combined_Email_Alerts.png)
+
+*Figure 7. Combined alert showing drift conditions handled automatically alongside conditions requiring manual review.*
+
+![Combined drift remediation notification](images/Combined_Email_Alerts_Remediation.png)
+
+*Figure 8. Remediation notification following resolution of the outstanding manual-review drift conditions.*
+
 ### 5. Verify the resulting configuration
 
 Inspect the affected device or endpoint and compare its resulting configuration with the expected value in `controller/intent.yml`.
@@ -435,6 +488,10 @@ The `images/` directory contains the current project screenshots:
 | `Zabbix Dashboard.png` | Zabbix monitoring dashboard |
 | `AlertEmail.png` | Drift detection email |
 | `RemediatedEmail.png` | Remediation email |
+| `Manual_Review.png` | Alert for a drift condition requiring network engineer review |
+| `Manual_Review_Remediation.png` | Evidence or notification associated with manual remediation |
+| `Combined_Email_Alerts.png` | Alert showing a combination of automatically remediable and manual-review drift conditions |
+| `Combined_Email_Alerts_Remediation.png` | Remediation notification after the outstanding manual-review drift conditions have been resolved |
 
 These images are embedded in the relevant sections above. Keep the filenames and directory name consistent with the Markdown image paths. If a filename changes, update its corresponding Markdown reference.
 
