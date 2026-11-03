@@ -1,3 +1,10 @@
+.env
+*.env
+
+__pycache__/
+.venv/
+venv/
+*.pyc
+
 clab-enterprise-core-lab/
 configs/
-__pycache__/
